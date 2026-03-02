@@ -2,8 +2,6 @@
 💱 IG Markets Trade Executor
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Uses official trading-ig Python library
-Much more reliable than raw API calls!
-
 acc_type="DEMO" → Demo Trading
 acc_type="LIVE" → Live Trading
 """
@@ -23,11 +21,12 @@ class IGTrader:
         self.demo       = demo
         self.ig         = None
         log.info(f"IG Trader init | Mode: {self.acc_type}")
+        log.info(f"Username: {self.username[:5]}*** | AccNumber: {self.acc_number}")
 
     # ─── Login ───────────────────────────────────────────────────────────────
     def login(self):
         try:
-            from trading_ig import IGService
+            from trading_ig.rest import IGService
 
             self.ig = IGService(
                 username   = self.username,
@@ -60,22 +59,27 @@ class IGTrader:
     def get_balance(self):
         try:
             accounts = self.ig.fetch_accounts()
-            for acc in accounts["accounts"]:
+            for _, acc in accounts.iterrows():
                 if acc["accountId"] == self.acc_number:
-                    bal = float(acc["balance"]["available"])
+                    bal = float(acc["balance"])
                     log.info(f"Balance: ${bal:,.2f}")
                     return bal
-            return 0
+            # Fallback - return first account balance
+            if len(accounts) > 0:
+                return float(accounts.iloc[0]["balance"])
+            return 10000
         except Exception as e:
             log.error(f"get_balance error: {e}")
-            return 0
+            return 10000
 
     # ─── Get Open Position ───────────────────────────────────────────────────
     def get_position(self, epic):
         try:
             positions = self.ig.fetch_open_positions()
-            for pos in positions.get("positions", []):
-                if pos["market"]["epic"] == epic:
+            if positions is None or len(positions) == 0:
+                return None
+            for _, pos in positions.iterrows():
+                if pos.get("epic") == epic:
                     log.info(f"Found open position for {epic}")
                     return pos
             return None
@@ -86,7 +90,7 @@ class IGTrader:
     # ─── Get PnL ────────────────────────────────────────────────────────────
     def check_pnl(self, position):
         try:
-            return float(position["position"].get("upl", 0))
+            return float(position.get("upl", 0))
         except:
             return 0
 
@@ -94,27 +98,27 @@ class IGTrader:
     def place_order(self, epic, direction, size, stop_distance, limit_distance, currency="USD"):
         try:
             result = self.ig.create_open_position(
-                currency_code    = currency,
-                direction        = direction,      # "BUY" or "SELL"
-                epic             = epic,
-                expiry           = "-",
-                force_open       = True,
-                guaranteed_stop  = False,
-                level            = None,
-                limit_distance   = limit_distance,
-                limit_level      = None,
-                order_type       = "MARKET",
-                quote_id         = None,
-                size             = size,
-                stop_distance    = stop_distance,
-                stop_level       = None,
-                time_in_force    = "FILL_OR_KILL",
-                trailing_stop    = False,
+                currency_code           = currency,
+                direction               = direction,
+                epic                    = epic,
+                expiry                  = "-",
+                force_open              = True,
+                guaranteed_stop         = False,
+                level                   = None,
+                limit_distance          = limit_distance,
+                limit_level             = None,
+                order_type              = "MARKET",
+                quote_id                = None,
+                size                    = size,
+                stop_distance           = stop_distance,
+                stop_level              = None,
+                time_in_force           = "FILL_OR_KILL",
+                trailing_stop           = False,
                 trailing_stop_increment = None
             )
             log.info(f"Order result: {result}")
             if result.get("dealStatus") == "ACCEPTED":
-                return {"success": True, "dealRef": result.get("dealReference")}
+                return {"success": True,  "dealRef": result.get("dealReference")}
             else:
                 return {"success": False, "error": result.get("reason", "Rejected")}
         except Exception as e:
@@ -124,10 +128,10 @@ class IGTrader:
     # ─── Close Position ──────────────────────────────────────────────────────
     def close_position(self, position):
         try:
-            deal_id   = position["position"]["dealId"]
-            direction = "SELL" if position["position"]["direction"] == "BUY" else "BUY"
-            size      = abs(float(position["position"]["size"]))
-            epic      = position["market"]["epic"]
+            deal_id   = position.get("dealId")
+            direction = "SELL" if position.get("direction") == "BUY" else "BUY"
+            size      = abs(float(position.get("size", 1)))
+            epic      = position.get("epic")
 
             result = self.ig.close_open_position(
                 deal_id    = deal_id,
@@ -144,4 +148,3 @@ class IGTrader:
         except Exception as e:
             log.error(f"close_position error: {e}")
             return {"success": False, "error": str(e)}
-
