@@ -1,0 +1,9 @@
+{
+  "max_trades_day": 5,
+  "max_daily_loss": 50.0,
+  "signal_threshold": 4,
+  "demo_mode": true,
+  "trade_eurusd": true,
+  "trade_gbpusd": true,
+  "trade_gold": true
+}

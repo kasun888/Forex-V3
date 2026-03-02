@@ -1,0 +1,4 @@
+trading-ig==0.0.22
+requests==2.31.0
+pytz==2024.1
+pandas==2.1.0
