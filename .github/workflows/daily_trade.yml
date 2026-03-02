@@ -1,49 +1,48 @@
-name: 🤖 IG Forex + Gold Bot
+name: IG Forex Gold Bot
 
 on:
   schedule:
-    - cron: '*/5 * * * 0-4'
     - cron: '*/5 21-23 * * 0'
-    - cron: '*/5 0-23 * * 1-4'
+    - cron: '*/5 * * * 1-4'
+    - cron: '*/5 0-21 * * 5'
   workflow_dispatch:
 
 jobs:
   trade:
     runs-on: ubuntu-latest
-
     steps:
-      - name: 📥 Checkout code
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: 🐍 Setup Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: 📦 Install dependencies
+      - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: 🔍 Debug IG Login
+      - name: Debug IG Login
         env:
           IG_USERNAME:      ${{ secrets.IG_USERNAME }}
           IG_PASSWORD:      ${{ secrets.IG_PASSWORD }}
-          IG_API_KEY:       ${{ secrets.IG_API_KEY5 }}
+          IG_API_KEY5:      ${{ secrets.IG_API_KEY5 }}
           IG_ACC_NUMBER:    ${{ secrets.IG_ACC_NUMBER }}
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python test_connection.py
 
-      - name: 🤖 Run IG Trading Bot
+      - name: Run IG Trading Bot
         env:
           IG_USERNAME:      ${{ secrets.IG_USERNAME }}
           IG_PASSWORD:      ${{ secrets.IG_PASSWORD }}
-          IG_API_KEY:       ${{ secrets.IG_API_KEY5 }}
+          IG_API_KEY5:      ${{ secrets.IG_API_KEY5 }}
           IG_ACC_NUMBER:    ${{ secrets.IG_ACC_NUMBER }}
           TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python bot.py
 
-      - name: 💾 Save trade logs
+      - name: Save trade logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -52,3 +51,29 @@ jobs:
             trades_*.json
             performance_log.txt
           retention-days: 30
+```
+
+---
+
+## 📤 Update on GitHub
+```
+GitHub repo
+→ .github/workflows
+→ daily_trade.yml
+→ Click pencil ✏️
+→ Select ALL → delete
+→ Paste above code
+→ Commit changes ✅
+```
+
+---
+
+## ✅ What Changed
+```
+Before: IG_API_KEY:  ${{ secrets.IG_API_KEY5 }}
+After:  IG_API_KEY5: ${{ secrets.IG_API_KEY5 }}
+
+Now everything matches:
+Secret name:    IG_API_KEY5 ✅
+Workflow sends: IG_API_KEY5 ✅
+Bot reads:      IG_API_KEY5 ✅
