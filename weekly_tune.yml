@@ -1,0 +1,38 @@
+name: 🔄 Weekly Auto-Tune
+
+on:
+  schedule:
+    # Every Sunday 2am Singapore time (Sunday UTC 18:00 = Monday SGT 2:00am)
+    - cron: '0 18 * * 0'
+
+  workflow_dispatch:  # Manual trigger ✅
+
+jobs:
+  auto_tune:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 📦 Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: 🔄 Run Auto-Tuner
+        env:
+          TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python auto_tune.py
+
+      - name: 💾 Commit updated settings
+        run: |
+          git config --local user.email "bot@trading.com"
+          git config --local user.name "AutoTuner Bot"
+          git add settings.json weekly_report_*.json
+          git diff --staged --quiet || git commit -m "🔄 Auto-tune: Updated settings $(date +'%Y-%m-%d')"
+          git push
