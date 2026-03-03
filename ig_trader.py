@@ -1,7 +1,3 @@
-"""
-💱 IG Markets Trade Executor
-"""
-
 import os
 import requests
 import logging
@@ -18,7 +14,6 @@ class IGTrader:
         self.base_url   = "https://demo-api.ig.com/gateway/deal" if demo else "https://api.ig.com/gateway/deal"
         self.cst        = None
         self.x_st       = None
-
         log.info(f"IG Trader | Mode: {'DEMO' if demo else 'LIVE'}")
         log.info(f"Username: {self.username[:4]}****")
         log.info(f"API Key:  {self.api_key[:4]}**** (len={len(self.api_key)})")
@@ -42,17 +37,16 @@ class IGTrader:
             r = requests.post(url, headers=headers, json=payload, timeout=15)
             log.info(f"Login status: {r.status_code}")
             log.info(f"Login response: {r.text[:300]}")
-
             if r.status_code == 200:
                 self.cst  = r.headers.get("CST")
                 self.x_st = r.headers.get("X-SECURITY-TOKEN")
-                log.info("✅ IG Login successful!")
+                log.info("IG Login successful!")
                 return True
             else:
-                log.error(f"❌ IG Login failed! {r.status_code}: {r.text}")
+                log.error(f"IG Login failed! {r.status_code}: {r.text}")
                 return False
         except Exception as e:
-            log.error(f"❌ Login exception: {e}")
+            log.error(f"Login exception: {e}")
             return False
 
     def _headers(self, version="1"):
@@ -158,26 +152,3 @@ class IGTrader:
         except Exception as e:
             log.error(f"close_position error: {e}")
             return {"success": False, "error": str(e)}
-```
-
----
-
-## 📤 Update on GitHub
-```
-GitHub repo
-→ Click ig_trader.py
-→ Click pencil ✏️
-→ Select ALL (Ctrl+A)
-→ Delete
-→ Paste above code
-→ Commit changes ✅
-```
-
----
-
-## ✅ Key Change
-```
-Line 9 now reads:
-self.api_key = os.environ.get("IG_API_KEY5", "")
-
-Matches your GitHub secret name exactly! ✅
