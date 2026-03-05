@@ -35,7 +35,7 @@ ASSETS = {
         "label":      "EUR/USD",
         "emoji":      "💱",
         "setting":    "trade_eurusd",
-        "size":       10000,
+        "size":       7000,     # Loss=$10.50 Profit=$17.50 USD
         "stop_pips":  15,
         "tp_pips":    25,
     },
@@ -45,7 +45,7 @@ ASSETS = {
         "label":      "GBP/USD",
         "emoji":      "💷",
         "setting":    "trade_gbpusd",
-        "size":       10000,
+        "size":       7000,     # Loss=$14.00 Profit=$21.00 USD
         "stop_pips":  20,
         "tp_pips":    30,
     },
@@ -55,16 +55,16 @@ ASSETS = {
         "label":      "Gold",
         "emoji":      "🥇",
         "setting":    "trade_gold",
-        "size":       5,        # 5 oz at $5140 = $25,700 notional
-        "stop_pips":  800,      # $8 risk (5oz x $0.01 x 800 = $40)
-        "tp_pips":    1500,     # $15 reward (5oz x $0.01 x 1500 = $75)
+        "size":       3,        # Loss=$24.00 Profit=$45.00 USD
+        "stop_pips":  800,
+        "tp_pips":    1500,
     },
 }
 
 def load_settings():
     default = {
         "max_trades_day":   4,
-        "max_daily_loss":   60.0,
+        "max_daily_loss":   40.0,
         "signal_threshold": 4,
         "demo_mode":        True,
         "trade_eurusd":     True,
