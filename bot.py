@@ -55,9 +55,9 @@ ASSETS = {
         "label":      "Gold",
         "emoji":      "🥇",
         "setting":    "trade_gold",
-        "size":       2,
-        "stop_pips":  200,
-        "tp_pips":    400,
+        "size":       5,        # 5 oz at $5140 = $25,700 notional
+        "stop_pips":  800,      # $8 risk (5oz x $0.01 x 800 = $40)
+        "tp_pips":    1500,     # $15 reward (5oz x $0.01 x 1500 = $75)
     },
 }
 
@@ -232,15 +232,20 @@ def run_bot():
                 direction = "BUY" if int(float(pos["long"]["units"])) > 0 else "SELL"
                 open_positions.append(config["emoji"] + " " + name + ": " + direction + " | $" + str(round(pnl, 2)))
 
-        if open_positions:
-            msg = ("Monitoring open trades\n"
-                   "Time: " + now.strftime("%H:%M SGT") + "\n"
-                   "Session: " + session + "\n"
-                   "Balance: $" + str(round(current_balance, 2)) + "\n"
-                   "Realized: $" + str(round(realized_pnl, 2)) + " USD\n"
-                   "Open: $" + str(round(open_pnl, 2)) + " USD\n"
-                   "---\n" + "\n".join(open_positions))
-            alert.send(msg)
+        pnl_emoji = "✅" if realized_pnl >= 0 else "❌"
+        pl_sgd_now = realized_pnl * 1.35
+        positions_str = "\n".join(open_positions) if open_positions else "No open trades"
+        msg = ("Off-hours status\n"
+               "Time: " + now.strftime("%H:%M SGT") + "\n"
+               "Session: " + session + "\n"
+               "Balance: $" + str(round(current_balance, 2)) + "\n"
+               "Realized: $" + str(round(realized_pnl, 2)) + " USD " + pnl_emoji + "\n"
+               "= $" + str(round(pl_sgd_now, 2)) + " SGD\n"
+               "Open PnL: $" + str(round(open_pnl, 2)) + " USD\n"
+               "Trading starts: 3pm SGT\n"
+               "---\n"
+               + positions_str)
+        alert.send(msg)
         return
 
     signals      = SignalEngine()
