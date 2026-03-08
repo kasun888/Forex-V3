@@ -1,9 +1,12 @@
 {
-  "max_trades_day": 5,
-  "max_daily_loss": 50.0,
+  "max_trades_day": 4,
+  "max_daily_loss": 40.0,
   "signal_threshold": 4,
   "demo_mode": true,
   "trade_eurusd": true,
   "trade_gbpusd": true,
-  "trade_gold": true
+  "trade_gold": true,
+  "risk_pct": 0.0002,
+  "max_consec_losses": 2,
+  "max_spread_pips": 2
 }
