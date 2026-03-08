@@ -18,6 +18,7 @@ import pytz
 from oanda_trader import OandaTrader
 from signals import SignalEngine
 from telegram_alert import TelegramAlert
+from calendar_filter import EconomicCalendar
 
 # Safe logging - never expose API keys
 class SafeFormatter(logging.Formatter):
@@ -337,8 +338,14 @@ def run_bot():
 
     # Active session - scan!
     signals      = SignalEngine()
+    calendar     = EconomicCalendar()
     scan_results = []
     new_trades   = 0
+
+    # Warn about news events today
+    news_summary = calendar.get_today_summary()
+    if "No high" not in news_summary:
+        alert.send("NEWS ALERT TODAY!\n" + news_summary)
 
     for name, config in ASSETS.items():
         if not settings.get(config["setting"], True):
@@ -364,6 +371,12 @@ def run_bot():
         spread_ok, spread_val = check_spread(trader, name, settings.get("max_spread_pips", 2), config["pip"])
         if not spread_ok:
             scan_results.append(config["emoji"] + " " + name + ": spread=" + str(round(spread_val, 1)) + " pips too wide - skip")
+            continue
+
+        # News blackout check
+        news_active, news_reason = calendar.is_news_time(name)
+        if news_active:
+            scan_results.append(config["emoji"] + " " + name + ": PAUSED - " + news_reason)
             continue
 
         # Trend filter
