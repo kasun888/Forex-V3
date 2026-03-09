@@ -195,10 +195,13 @@ def run_bot():
     now      = datetime.now(sg_tz)
     alert    = TelegramAlert()
     hour     = now.hour
+    minute   = now.minute
 
-    # Session detection
-    # Singapore time: 2pm-11pm SGT (proposed improvement!)
-    good_session = (14 <= hour <= 23) or (0 <= hour <= 1)
+    log.info("Current SGT time: " + now.strftime("%Y-%m-%d %H:%M SGT"))
+
+    # Session detection - strictly 2pm to 11pm SGT only!
+    # No overnight trading - caused big losses!
+    good_session = (14 <= hour <= 22) or (hour == 23 and minute == 0)
 
     if 14 <= hour <= 17:
         session = "London Open (HOT!)"
@@ -399,12 +402,13 @@ def run_bot():
             scan_results.append(config["emoji"] + " " + name + ": " + str(score) + "/5 weak signal")
             continue
 
-        # Dynamic position sizing
-        risk_pct  = settings.get("risk_pct", 0.005)
-        size      = calc_position_size(
-            current_balance, risk_pct,
-            config["stop_pips"], config["pip"]
-        )
+        # Position sizing - ALWAYS use fixed_units!
+        # Fixed 0.10 lot for forex, 3 oz for gold
+        if name == "XAU_USD":
+            size = int(settings.get("fixed_gold_oz", 3))
+        else:
+            size = int(settings.get("fixed_units", 10000))
+        log.info(name + " fixed size=" + str(size) + " units")
         max_loss  = round(size * config["stop_pips"] * config["pip"], 2)
         max_profit = round(size * config["tp_pips"] * config["pip"], 2)
 
@@ -421,8 +425,9 @@ def run_bot():
 
         if result["success"]:
             today["trades"]        += 1
-            today["consec_losses"]  = 0  # Reset on new trade
+            today["consec_losses"]  = 0  # Reset on successful new trade
             new_trades             += 1
+            log.info("Trade placed! Total today: " + str(today["trades"]))
             with open(trade_log, "w") as f:
                 json.dump(today, f, indent=2)
 
