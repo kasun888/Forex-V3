@@ -23,9 +23,11 @@ log.addFilter(SafeFilter())
 
 class SignalEngine:
     def __init__(self):
-        self.api_key    = os.environ.get("OANDA_API_KEY","")
-        self.account_id = os.environ.get("OANDA_ACCOUNT_ID","")
-        self.base_url   = "https://api-fxpractice.oanda.com"
+        self.api_key    = os.environ.get("OANDA_API_KEY","").strip()
+        self.account_id = os.environ.get("OANDA_ACCOUNT_ID","").strip()
+        # Read demo_mode from env so it matches oanda_trader.py
+        demo            = os.environ.get("OANDA_DEMO", "true").lower() != "false"
+        self.base_url   = "https://api-fxpractice.oanda.com" if demo else "https://api-trade.oanda.com"
         self.headers    = {"Authorization":"Bearer "+self.api_key}
 
     INSTR_MAP = {
