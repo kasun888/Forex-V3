@@ -6,10 +6,12 @@ Runs bot every 5 minutes with IN-MEMORY state
 (Railway filesystem is ephemeral - no file storage!)
 
 FIX LOG:
-  BUG-12: STATE now includes "start_balance" field (was missing — broke daily PnL calc)
+  BUG-12: STATE now includes "start_balance" field (was missing -- broke daily PnL calc)
   BUG-13: Day-reset block now fetches fresh balance from OANDA to seed start_balance
            (previously reset to 0.0, making daily PnL always show $0)
-  BUG-14: Added hourly heartbeat Telegram message so silence ≠ broken bot
+  BUG-14: REMOVED heartbeat -- was spamming Telegram every hour
+  BUG-15: Weekend silence -- no Telegram messages on Saturday or Sunday before 5am SGT
+  BUG-16: "New Day Started" alert suppressed on weekends
 """
 
 import time
@@ -29,7 +31,6 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 INTERVAL_MINUTES = 5
-HEARTBEAT_CYCLES = 12   # every 12 × 5 min = 60 min
 
 # ── IN-MEMORY STATE (persists across 5-min runs, resets on restart) ──────────
 STATE = {}
@@ -38,6 +39,12 @@ STATE = {}
 def get_today_key():
     sg_tz = pytz.timezone("Asia/Singapore")
     return datetime.now(sg_tz).strftime("%Y%m%d")
+
+
+def is_weekend(now):
+    """True during market-closed weekend: Saturday all day, Sunday before 5am SGT."""
+    wd = now.weekday()
+    return wd == 5 or (wd == 6 and now.hour < 5)
 
 
 def fresh_day_state(today_str, balance):
@@ -55,7 +62,7 @@ def fresh_day_state(today_str, balance):
         "cooldowns":     {},
         "open_times":    {},
         "news_alerted":  {},
-        "cycle_count":   0,    # BUG-14: heartbeat counter
+        "daily_summary_sent": False,
     }
 
 
@@ -64,7 +71,7 @@ def main():
     global STATE
 
     log.info("=" * 50)
-    log.info("🚀 Railway Bot Started - OANDA Demo 2")
+    log.info("Railway Bot Started - OANDA Demo 2")
     log.info("Strategy: M1 Ultra-Scalp")
     log.info("Interval: Every " + str(INTERVAL_MINUTES) + " minutes")
     log.info("=" * 50)
@@ -72,11 +79,17 @@ def main():
     while True:
         now   = datetime.now(sg_tz)
         today = now.strftime("%Y%m%d")
-        log.info("⏰ " + now.strftime("%Y-%m-%d %H:%M SGT"))
+        log.info("Scan: " + now.strftime("%Y-%m-%d %H:%M SGT"))
+
+        # BUG-15/16 FIX: skip entirely on weekend -- no trades, no Telegram noise
+        if is_weekend(now):
+            log.info("Weekend -- bot silent, sleeping...")
+            time.sleep(INTERVAL_MINUTES * 60)
+            continue
 
         # BUG-12/13 FIX: fetch live balance when resetting for a new day
         if STATE.get("date") != today:
-            log.info("📅 New day! Fetching balance for day reset...")
+            log.info("New day! Fetching balance for day reset...")
             try:
                 trader  = OandaTrader(demo=True)
                 balance = trader.get_balance() if trader.login() else 0.0
@@ -84,46 +97,24 @@ def main():
                 log.warning("Could not fetch balance for day reset: " + str(e))
                 balance = 0.0
 
-            log.info("📅 New day! Balance: $" + str(round(balance, 2)))
+            log.info("New day! Balance: $" + str(round(balance, 2)))
             STATE = fresh_day_state(today, balance)
 
-            # Send daily reset notification
+            # BUG-16 FIX: only send new-day alert on weekdays (weekend check above)
             alert = TelegramAlert()
             alert.send(
-                "📅 New Day Started\n"
+                "New Day Started\n"
                 "Balance: $" + str(round(balance, 2)) + "\n"
-                "Bot is running every 5 min ✅"
+                "Bot is running every 5 min"
             )
 
         try:
             run_bot(state=STATE)
         except Exception as e:
-            log.error("❌ Bot error: " + str(e))
+            log.error("Bot error: " + str(e))
             log.error(traceback.format_exc())
 
-        # BUG-14 FIX: hourly heartbeat so you know the bot is alive
-        STATE["cycle_count"] = STATE.get("cycle_count", 0) + 1
-        if STATE["cycle_count"] % HEARTBEAT_CYCLES == 0:
-            try:
-                trader  = OandaTrader(demo=True)
-                balance = trader.get_balance() if trader.login() else STATE.get("start_balance", 0.0)
-                start   = STATE.get("start_balance", balance)
-                pnl     = round(balance - start, 2)
-                pnl_sgd = round(pnl * 1.35, 2)
-                pnl_emoji = "✅" if pnl >= 0 else "🔴"
-                alert = TelegramAlert()
-                alert.send(
-                    "💓 Bot Heartbeat\n"
-                    "Time:    " + now.strftime("%H:%M SGT") + "\n"
-                    "Balance: $" + str(round(balance, 2)) + "\n"
-                    "Day P&L: $" + str(pnl) + " " + pnl_emoji + " ≈ SGD " + str(pnl_sgd) + "\n"
-                    "W/L:     " + str(STATE.get("wins", 0)) + "/" + str(STATE.get("losses", 0)) + "\n"
-                    "Trades:  " + str(STATE.get("trades", 0))
-                )
-            except Exception as e:
-                log.warning("Heartbeat send failed: " + str(e))
-
-        log.info("💤 Sleeping " + str(INTERVAL_MINUTES) + " mins...")
+        log.info("Sleeping " + str(INTERVAL_MINUTES) + " mins...")
         time.sleep(INTERVAL_MINUTES * 60)
 
 
