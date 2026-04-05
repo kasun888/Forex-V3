@@ -250,6 +250,27 @@ def run_bot(state):
             )
         return
 
+    # ── Daily summary at 23:59 ───────────────────────────────────────
+    if hour == 23 and now.minute >= 59:
+        if not state.get("daily_summary_sent"):
+            state["daily_summary_sent"] = True
+            wins   = state.get("wins", 0)
+            losses = state.get("losses", 0)
+            total  = wins + losses
+            wr     = round((wins / total * 100), 1) if total > 0 else 0.0
+            alert.send(
+                "\U0001f4ca Daily Summary\n"
+                "\u2500" * 22 + "\n"
+                "\u2705 Wins:   " + str(wins) + "\n"
+                "\U0001f534 Losses: " + str(losses) + "\n"
+                "\U0001f4c8 Win Rate: " + str(wr) + "%\n"
+                "Total Trades: " + str(total) + "\n"
+                "\u2500" * 22 + "\n"
+                "P&L:  $" + str(realized_pnl) + " " + pnl_emoji + "\n"
+                "    \u2248 SGD " + str(pl_sgd)
+            )
+        return
+
     # ── 15-MIN HARD CLOSE ────────────────────────────────────────────
     for name in ASSETS:
         pos = trader.get_position(name)
