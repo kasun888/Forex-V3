@@ -1,8 +1,7 @@
 """
 OANDA Trade Executor
 SL + TP set automatically on every order.
-Added: get_open_trade_id() for reliable 15-min timer.
-FIX: Added env var validation + detailed login error logging.
+FIX: login() now returns detailed error reason for debugging.
 """
 
 import os, requests, logging
@@ -11,59 +10,48 @@ log = logging.getLogger(__name__)
 
 class OandaTrader:
     def __init__(self, demo=True):
-        self.api_key    = os.environ.get("OANDA_API_KEY", "").strip()
-        self.account_id = os.environ.get("OANDA_ACCOUNT_ID", "").strip()
+        self.api_key    = os.environ.get("OANDA_API_KEY", "")
+        self.account_id = os.environ.get("OANDA_ACCOUNT_ID", "")
         self.demo       = demo
-        self.base_url   = "https://api-fxpractice.oanda.com" if demo else "https://api-trade.oanda.com"
+        self.base_url   = "https://api-fxtrade.oanda.com" if not demo else "https://api-fxpractice.oanda.com"
         self.headers    = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type":  "application/json"
         }
         log.info(f"OANDA | Mode: {'DEMO' if demo else 'LIVE'}")
-        log.info(f"Account: {self.account_id}")
-
-        # Validate env vars are actually set
-        if not self.api_key:
-            log.error("OANDA_API_KEY is MISSING or EMPTY in environment variables!")
-        else:
-            log.info(f"API Key: {self.api_key[:8]}****")
-
-        if not self.account_id:
-            log.error("OANDA_ACCOUNT_ID is MISSING or EMPTY in environment variables!")
+        log.info(f"Account: '{self.account_id}'")
+        log.info(f"API Key: '{self.api_key[:8]}****'  (len={len(self.api_key)})")
+        log.info(f"Base URL: {self.base_url}")
 
     def login(self):
-        # Guard: fail fast with clear message if env vars missing
+        # Guard: catch missing env vars before making HTTP call
         if not self.api_key:
-            log.error("Cannot login — OANDA_API_KEY not set in Railway Variables!")
+            log.error("Login FAILED: OANDA_API_KEY env var is EMPTY or not set!")
             return False
         if not self.account_id:
-            log.error("Cannot login — OANDA_ACCOUNT_ID not set in Railway Variables!")
+            log.error("Login FAILED: OANDA_ACCOUNT_ID env var is EMPTY or not set!")
             return False
 
         try:
             r = requests.get(
                 f"{self.base_url}/v3/accounts/{self.account_id}",
-                headers=self.headers,
-                timeout=15
+                headers=self.headers, timeout=15
             )
             if r.status_code == 200:
                 bal = float(r.json()["account"]["balance"])
                 log.info(f"Login success! Balance: ${bal:.2f}")
                 return True
-
-            # Detailed error to help diagnose
-            log.error(f"Login failed: HTTP {r.status_code}")
-            log.error(f"Response: {r.text[:500]}")
+            # Log the exact HTTP error to help diagnose
+            log.error(f"Login FAILED: HTTP {r.status_code} — {r.text[:300]}")
             if r.status_code == 401:
-                log.error("HTTP 401 = Invalid API key. Check OANDA_API_KEY in Railway Variables.")
+                log.error("→ 401 = API key is wrong or expired. Check OANDA_API_KEY in Railway Variables.")
             elif r.status_code == 403:
-                log.error("HTTP 403 = API key does not have permission for this account.")
+                log.error("→ 403 = Account ID mismatch or key has no access to this account.")
             elif r.status_code == 404:
-                log.error("HTTP 404 = Account ID not found. Check OANDA_ACCOUNT_ID in Railway Variables.")
+                log.error("→ 404 = Account not found. Check OANDA_ACCOUNT_ID format (e.g. 101-003-XXXXXXX-001).")
             return False
-
         except requests.exceptions.Timeout:
-            log.error("Login timeout — OANDA API did not respond in 15s")
+            log.error("Login FAILED: Request timed out — OANDA API unreachable from Railway.")
             return False
         except Exception as e:
             log.error(f"Login error: {e}")
@@ -71,11 +59,8 @@ class OandaTrader:
 
     def get_balance(self):
         try:
-            r   = requests.get(
-                f"{self.base_url}/v3/accounts/{self.account_id}",
-                headers=self.headers,
-                timeout=10
-            )
+            r   = requests.get(f"{self.base_url}/v3/accounts/{self.account_id}",
+                               headers=self.headers, timeout=10)
             bal = float(r.json()["account"]["balance"])
             log.info(f"Balance: ${bal:.2f}")
             return bal
@@ -103,8 +88,7 @@ class OandaTrader:
         try:
             r = requests.get(
                 f"{self.base_url}/v3/accounts/{self.account_id}/positions/{instrument}",
-                headers=self.headers,
-                timeout=10
+                headers=self.headers, timeout=10
             )
             if r.status_code == 200:
                 pos         = r.json()["position"]
@@ -118,10 +102,6 @@ class OandaTrader:
             return None
 
     def get_open_trade_id(self, instrument):
-        """
-        Returns (trade_id, open_time_str) for the first open trade on instrument.
-        Uses /trades endpoint which has proper trade-level data including openTime.
-        """
         try:
             r = requests.get(
                 f"{self.base_url}/v3/accounts/{self.account_id}/trades",
@@ -134,7 +114,7 @@ class OandaTrader:
                 if trades:
                     trade    = trades[0]
                     trade_id = trade.get("id")
-                    open_time= trade.get("openTime", "")
+                    open_time= trade.get("openTime","")
                     return trade_id, open_time
             return None, None
         except Exception as e:
@@ -157,8 +137,8 @@ class OandaTrader:
             if price is None:
                 return {"success": False, "error": "Cannot get price"}
 
-            pip       = 0.01 if ("JPY" in instrument or instrument in ["XAU_USD", "XAG_USD"]) else 0.0001
-            precision = 2 if instrument in ["XAU_USD", "XAG_USD"] else (3 if "JPY" in instrument else 5)
+            pip       = 0.01 if ("JPY" in instrument or instrument in ["XAU_USD","XAG_USD"]) else 0.0001
+            precision = 2 if instrument in ["XAU_USD","XAG_USD"] else (3 if "JPY" in instrument else 5)
 
             entry    = ask if direction == "BUY" else bid
             if direction == "BUY":
@@ -188,11 +168,11 @@ class OandaTrader:
 
             if r.status_code in [200, 201]:
                 if "orderFillTransaction" in data:
-                    trade_id = data["orderFillTransaction"].get("id", "N/A")
+                    trade_id = data["orderFillTransaction"].get("id","N/A")
                     log.info(f"Trade placed! ID: {trade_id}")
                     return {"success": True, "trade_id": trade_id}
                 elif "orderCancelTransaction" in data:
-                    reason = data["orderCancelTransaction"].get("reason", "Unknown")
+                    reason = data["orderCancelTransaction"].get("reason","Unknown")
                     return {"success": False, "error": f"Cancelled: {reason}"}
                 return {"success": True}
             return {"success": False, "error": data.get("errorMessage", str(data))}

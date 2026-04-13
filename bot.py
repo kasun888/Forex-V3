@@ -1,722 +1,324 @@
 """
-OANDA Trading Bot — Gold Only | CPR + EMA + Volume
-===================================================
-Pair:     XAU/USD (Gold only)
-Sessions: Asian (9am-1pm SGT) | London (2pm-7pm SGT) | NY (8pm-11pm SGT)
+OANDA — M1 Ultra-Scalp Bot  (GBP/USD ONLY — London Session)
+============================================================
+$10,000 demo | 1 pair | 74,000 units
+
+Trade specs:
+  Pair:    GBP/USD only
+  Size:    74,000 units
+  SL:      13 pips => SGD ~130
+  TP:      26 pips => SGD ~260  [2:1 R:R]
+  Max dur: 30 minutes hard close
+
+Session SGT (London):
+  GBP/USD  : 15:00 – 23:59 SGT  (London 08:00-17:00 + NY overlap)
+
+Signal Engine (4 layers):
+  L0: M15 EMA8 vs EMA21 — direction must match M15 momentum
+  L1: M5  EMA8 vs EMA21 — trend bias confirmation
+  L2: M5  RSI(9) <=35 BUY / >=65 SELL + delta>=1.0 + EMA50 + candle
+  L3: M1  trigger candle — engulf or pin-bar
+  L4: H1  EMA200 — hard block: only BUY above, only SELL below
 
 FIX LOG:
-  FIX 1 - Removed trade_journal import (next phase)
-  FIX 2 - Fixed open_count NameError crash in sync
-  FIX 3 - Hard 10-min duplicate lock (stops 4-6 orders/min bug)
-  FIX 4 - sync no longer overwrites today["trades"] counter
-  FIX 5 - sync no longer overwrites last_trade_entry_price
-  FIX 6 - Smart re-entry guard (4 rules)
-  FIX 7 - Daily summary at 11pm SGT
-  FIX 8 - H4 block: Asian = -1pt penalty (not a kill); London/NY = BLOCKED direction
-         All 7 checks always run; full score always shown in Telegram
-  FIX 9 - Eliminated double signals.analyze() call in re-entry guard (halves API calls)
-  FIX 10 - Eliminated duplicate "Watching" alert; BLOCKED handled by main scan alert only
+  V3-01: Removed EUR/USD — GBP/USD only
+  V3-02: London session only — 15:00-23:59 SGT
+  V3-03: Trade size 74,000 units => TP~SGD 100 / SL~SGD 50 (2:1 R:R)
+  V3-04: SL=13 pips, TP=26 pips
+  V3-05: Signal engine hardcoded for GBPUSD only
 """
 
-import os
-import json
-import logging
-import time
-import requests
-from datetime import datetime, timedelta
+import os, json, time, logging, requests
+from datetime import datetime, timezone
+from pathlib import Path
 import pytz
 
-from oanda_trader import OandaTrader
-from signals import SignalEngine
-from cpr import CPRCalculator
-from telegram_alert import TelegramAlert
-from calendar_filter import EconomicCalendar
+from signals         import SignalEngine
+from oanda_trader    import OandaTrader
+from telegram_alert  import TelegramAlert
+from calendar_filter import EconomicCalendar as CalendarFilter
 
-
-class SafeFormatter(logging.Formatter):
-    def format(self, record):
-        msg = super().format(record)
-        key = os.environ.get("OANDA_API_KEY", "")
-        if key and key in msg:
-            msg = msg.replace(key, "***")
-        return msg
-
-
-handler      = logging.StreamHandler()
-handler.setFormatter(SafeFormatter("%(asctime)s | %(levelname)s | %(message)s"))
-file_handler = logging.FileHandler("performance_log.txt")
-file_handler.setFormatter(SafeFormatter("%(asctime)s | %(levelname)s | %(message)s"))
-logging.basicConfig(level=logging.INFO, handlers=[handler, file_handler])
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger(__name__)
 
+sg_tz   = pytz.timezone("Asia/Singapore")
+signals = SignalEngine()
+
+TRADE_SIZE   = 74000   # => TP ~SGD 100 / SL ~SGD 50
+SL_PIPS      = 13
+TP_PIPS      = 26
+MAX_DURATION = 30
+USD_SGD      = 1.35
+
+# GBP/USD only — London session: 15:00–23:59 SGT
+# London opens 08:00 UK = 15:00 SGT; NY overlap ends ~00:00 SGT
 ASSETS = {
-    "XAU_USD": {
-        "instrument":    "XAU_USD",
-        "asset":         "XAUUSD",
-        "emoji":         "🥇",
-        "setting":       "trade_gold",
-        "pip":           0.01,
-        "precision":     2,
-        "session_hours": [(9, 23)],
+    "GBP_USD": {
+        "instrument": "GBP_USD", "asset": "GBPUSD", "emoji": "💷",
+        "pip": 0.0001, "precision": 5,
+        "stop_pips": SL_PIPS, "tp_pips": TP_PIPS,
+        "max_spread": 1.5,
+        "sessions": [(15, 24)],   # 15:00 – 23:59 SGT
     },
 }
 
-RISK_PCT_PER_TRADE = 0.01
-RISK_USD_MAX       = 15.0
-RISK_USD_MIN       = 1.0
+DEFAULT_SETTINGS = {"signal_threshold": 4, "demo_mode": True}
 
-
-def calc_position_size(balance, stop_pips, pip, score, price):
-    try:
-        risk_dollars  = min(balance * RISK_PCT_PER_TRADE, RISK_USD_MAX)
-        risk_dollars  = max(risk_dollars, RISK_USD_MIN)
-        risk_per_unit = stop_pips * pip
-        if risk_per_unit <= 0:
-            return 1
-        scale = 1.0 if score >= 6 else 0.75
-        units = max(1, int((risk_dollars / risk_per_unit) * scale))
-        log.info(f"Size: bal=${balance:.2f} risk=${risk_dollars:.2f} stop={stop_pips}p units={units} score={score}/7")
-        return units
-    except Exception as e:
-        log.warning(f"Position size error: {e}")
-        return 1
+_SETTINGS_PATH = Path(__file__).parent / "settings.json"
 
 
 def load_settings():
-    default = {
-        "max_trades_day":         999,
-        "signal_threshold":       5,
-        "signal_threshold_asian": 4,
-        "demo_mode":              True,
-        "trade_gold":             True,
-        "trade_gold_asian":       True,
-        "max_consec_losses":      999,
-        "max_spread_gold":        999,
-        "max_spread_gold_asian":  999,
-        "strategy":               "hybrid_cpr_breakout_gold",
-        "max_trades_asian":       999,
-        "max_trades_main":        999,
-    }
     try:
-        with open("settings.json") as f:
-            saved = json.load(f)
-            default.update(saved)
+        with open(_SETTINGS_PATH) as f:
+            DEFAULT_SETTINGS.update(json.load(f))
     except FileNotFoundError:
-        with open("settings.json", "w") as f:
-            json.dump(default, f, indent=2)
-    return default
+        with open(_SETTINGS_PATH, "w") as f:
+            json.dump(DEFAULT_SETTINGS, f, indent=2)
+    return DEFAULT_SETTINGS
 
 
-def sync_closed_trades(trader, today, trade_log):
-    """Sync W/L from OANDA. Does NOT touch trade counter or entry price."""
+def is_in_session(hour, cfg):
+    return any(s <= hour < e for s, e in cfg["sessions"])
+
+
+def set_cooldown(state, name):
+    if "cooldowns" not in state:
+        state["cooldowns"] = {}
+    state["cooldowns"][name] = datetime.now(timezone.utc).isoformat()
+    log.info(name + " cooldown 30 min")
+
+
+def in_cooldown(state, name):
+    cd = state.get("cooldowns", {}).get(name)
+    if not cd:
+        return False
     try:
-        from datetime import timezone
-        sg_tz         = pytz.timezone("Asia/Singapore")
-        now_sg        = datetime.now(sg_tz)
-        day_start     = now_sg.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_start_utc = day_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000000Z")
-
-        url    = trader.base_url + "/v3/accounts/" + trader.account_id + "/trades"
-        params = {"state": "CLOSED", "instrument": "XAU_USD", "count": "20"}
-        r      = requests.get(url, headers=trader.headers, params=params, timeout=10)
-        if r.status_code != 200:
-            return
-
-        trades = r.json().get("trades", [])
-        wins = losses = trade_count = 0
-        for t in trades:
-            if t.get("closeTime", "") < day_start_utc:
-                continue
-            trade_count += 1
-            pl = float(t.get("realizedPL", 0))
-            if pl > 0:   wins   += 1
-            elif pl < 0: losses += 1
-
-        today["wins"]   = wins
-        today["losses"] = losses
-        # FIX 4: Never overwrite today["trades"] — local counter is source of truth
-
-        consec = 0
-        for t in sorted(trades, key=lambda x: x.get("closeTime", ""), reverse=True):
-            if t.get("closeTime", "") < day_start_utc:
-                break
-            if float(t.get("realizedPL", 0)) < 0:
-                consec += 1
-            else:
-                break
-        today["consec_losses"] = consec
-
-        with open(trade_log, "w") as f:
-            json.dump(today, f, indent=2)
-
-        today_closed = [t for t in trades if t.get("closeTime", "") >= day_start_utc]
-        if today_closed:
-            latest = sorted(today_closed, key=lambda x: x.get("closeTime", ""))[-1]
-            today["last_trade_close_time"]   = latest.get("closeTime", "")
-            today["last_trade_close_result"] = "WIN" if float(latest.get("realizedPL", 0)) > 0 else "LOSS"
-            # FIX 5: Do NOT overwrite last_trade_entry_price here
-
-        # FIX 2: open_count removed — was undefined after FIX 4
-        log.info("Synced W=" + str(wins) + " L=" + str(losses) + " consec=" + str(consec))
-
+        cd_dt   = datetime.fromisoformat(cd)
+        now_utc = datetime.now(timezone.utc)
+        elapsed = (now_utc - cd_dt).total_seconds() / 60
+        return elapsed < 30
     except Exception as e:
-        log.warning("Sync trades error: " + str(e))
+        log.warning("in_cooldown parse error for " + name + ": " + str(e))
+        return False
 
 
-def get_atr_pips(trader, instrument, pip, multiplier=1.0):
+def cooldown_remaining(state, name):
+    cd = state.get("cooldowns", {}).get(name)
+    if not cd:
+        return 0
     try:
-        url    = trader.base_url + "/v3/instruments/" + instrument + "/candles"
-        params = {"count": "30", "granularity": "H1", "price": "M"}
-        r      = requests.get(url, headers=trader.headers, params=params, timeout=10)
-        if r.status_code != 200:
-            return None
-        c      = [x for x in r.json()["candles"] if x["complete"]]
-        if len(c) < 15:
-            return None
-        highs  = [float(x["mid"]["h"]) for x in c]
-        lows   = [float(x["mid"]["l"]) for x in c]
-        closes = [float(x["mid"]["c"]) for x in c]
-        trs    = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1]))
-                  for i in range(1, len(closes))]
-        atr      = sum(trs[-14:]) / 14
-        atr_pips = (atr / pip) * multiplier
-        log.info(instrument + " ATR=" + str(round(atr, 4)) + " pips=" + str(round(atr_pips, 0)))
-        return max(round(atr_pips), 10)
-    except Exception as e:
-        log.warning("ATR error: " + str(e))
-        return None
+        cd_dt   = datetime.fromisoformat(cd)
+        now_utc = datetime.now(timezone.utc)
+        elapsed = (now_utc - cd_dt).total_seconds() / 60
+        return max(0, int(30 - elapsed))
+    except:
+        return "?"
 
 
-def check_spread(trader, instrument, max_spread_pips, pip):
-    try:
-        mid, bid, ask = trader.get_price(instrument)
-        if bid is None:
-            return True, 0
-        spread_pips = (ask - bid) / pip
-        log.info(instrument + " spread=" + str(round(spread_pips, 1)) + " pips")
-        return (spread_pips <= max_spread_pips), spread_pips
-    except Exception as e:
-        log.warning("Spread error: " + str(e))
-        return True, 0
-
-
-def send_daily_summary(alert, today, cpr_gold, mode):
-    """FIX 7: Send P&L summary at 11pm SGT."""
-    try:
-        wins         = today.get("wins", 0)
-        losses       = today.get("losses", 0)
-        total        = wins + losses
-        win_rate     = round((wins / total * 100)) if total > 0 else 0
-        realized     = today.get("daily_pnl", 0.0)
-        realized_sgd = round(realized * 1.35, 2)
-        pnl_emoji    = "UP" if realized >= 0 else "DOWN"
-        wr_emoji     = "GREEN" if win_rate >= 60 else ("YELLOW" if win_rate >= 40 else "RED")
-
-        cpr_line = ""
-        if cpr_gold:
-            w     = cpr_gold.get("width_pct", 0)
-            w_lbl = "NARROW-trending" if cpr_gold["is_narrow"] else ("WIDE-choppy" if cpr_gold["is_wide"] else "NORMAL")
-            cpr_line = (
-                "\n--- Tomorrow CPR ---\n"
-                "TC=" + str(cpr_gold["tc"]) + " BC=" + str(cpr_gold["bc"]) + "\n"
-                "R1=" + str(cpr_gold["r1"]) + " S1=" + str(cpr_gold["s1"]) + "\n"
-                "Width=" + str(w) + "% " + w_lbl + "\n"
-            )
-
-        msg = (
-            "📊 GOLD BOT Daily Summary\n"
-            "-------------------------\n"
-            "Mode:     " + mode + "\n"
-            "-------------------------\n"
-            "Trades:   " + str(total) + "\n"
-            "W / L:    " + str(wins) + " / " + str(losses) + "\n"
-            "Win Rate: " + wr_emoji + " " + str(win_rate) + "%\n"
-            "-------------------------\n"
-            "P&L: " + pnl_emoji + " $" + str(round(realized, 2)) + " USD\n"
-            "     " + pnl_emoji + " $" + str(realized_sgd) + " SGD"
-            + cpr_line +
-            "-------------------------\n"
-            "Bot resumes 9am SGT tomorrow"
-        )
-        alert.send(msg)
-        log.info("Daily summary sent")
-    except Exception as e:
-        log.warning("Daily summary error: " + str(e))
-
-
-def run_bot():
-    log.info("🥇 GOLD BOT scanning...")
-    settings = load_settings()
-    sg_tz    = pytz.timezone("Asia/Singapore")
-    now      = datetime.now(sg_tz)
-    alert    = TelegramAlert()
-    cpr_calc = CPRCalculator(demo=settings["demo_mode"])
-    hour     = now.hour
-
-    active_hours = (9 <= hour <= 23)
-    london_open  = (14 <= hour <= 17)
-    london       = (14 <= hour <= 19)
-    ny_overlap   = (20 <= hour <= 23)
-    asian        = (9 <= hour <= 13)
-    good_session = active_hours
-
-    if asian:
-        session = "Asian Session (SGX/Tokyo 9am-1pm SGT)"
-    elif london_open:
-        session = "London Open (BEST for Gold breakouts!)"
-    elif ny_overlap:
-        session = "NY Overlap (BEST for Gold macro moves!)"
-    elif london:
-        session = "London Session"
-    else:
-        session = "Off-hours (monitoring only)"
-
-    if now.weekday() == 5:
-        log.info("Saturday — markets closed")
+def detect_sl_tp_hits(state, trader, alert):
+    if "open_times" not in state:
         return
-    if now.weekday() == 6 and hour < 9:
-        log.info("Sunday early — skipping")
+    for name in list(state["open_times"].keys()):
+        if trader.get_position(name):
+            continue
+        try:
+            url  = (trader.base_url + "/v3/accounts/" + trader.account_id +
+                    "/trades?state=CLOSED&instrument=" + name + "&count=1")
+            data = requests.get(url, headers=trader.headers, timeout=10).json().get("trades", [])
+            if data:
+                pnl     = float(data[0].get("realizedPL", "0"))
+                pnl_sgd = round(pnl * USD_SGD, 2)
+                emoji   = ASSETS.get(name, {}).get("emoji", "")
+                wins    = state.get("wins", 0)
+                losses  = state.get("losses", 0)
+                if pnl < 0:
+                    set_cooldown(state, name)
+                    state["losses"]        = losses + 1
+                    state["consec_losses"] = state.get("consec_losses", 0) + 1
+                    alert.send(
+                        "🔴 SL HIT\n" + emoji + " " + name + "\n"
+                        "Loss:  $" + str(round(pnl, 2)) + " USD\n"
+                        "     ≈ SGD -" + str(abs(pnl_sgd)) + "\n"
+                        "⏳ Cooldown 30 min\n"
+                        "W/L: " + str(wins) + "/" + str(state["losses"])
+                    )
+                else:
+                    state["wins"]          = wins + 1
+                    state["consec_losses"] = 0
+                    alert.send(
+                        "✅ TP HIT\n" + emoji + " " + name + "\n"
+                        "Profit: $+" + str(round(pnl, 2)) + " USD\n"
+                        "      ≈ SGD +" + str(pnl_sgd) + "\n"
+                        "W/L: " + str(state["wins"]) + "/" + str(losses)
+                    )
+        except Exception as e:
+            log.warning("SL/TP detect error " + name + ": " + str(e))
+        del state["open_times"][name]
+
+
+def run_bot(state):
+    settings  = load_settings()
+    now       = datetime.now(sg_tz)
+    hour      = now.hour
+    alert     = TelegramAlert()
+    calendar  = CalendarFilter()
+
+    log.info("Scan at " + now.strftime("%H:%M:%S SGT"))
+
+    active = [n for n, c in ASSETS.items() if is_in_session(hour, c)]
+    if not active:
+        log.info("Outside London session (" + str(hour) + "h SGT) — sleeping until 15:00 SGT")
         return
 
     trader = OandaTrader(demo=settings["demo_mode"])
     if not trader.login():
-        alert.send(
-            "❌ OANDA Login Failed\n"
-            "Check OANDA_API_KEY and OANDA_ACCOUNT_ID\n"
-            "demo_mode=true  -> practice account\n"
-            "demo_mode=false -> live account"
-        )
-        return
-
-    current_balance = trader.last_balance
-    mode            = "DEMO" if settings["demo_mode"] else "LIVE"
-
-    trade_log = "trades_" + now.strftime("%Y%m%d") + ".json"
-    try:
-        with open(trade_log) as f:
-            today = json.load(f)
-    except FileNotFoundError:
-        today = {
-            "trades":                   0,
-            "start_balance":            current_balance,
-            "daily_pnl":                0.0,
-            "stopped":                  False,
-            "wins":                     0,
-            "losses":                   0,
-            "consec_losses":            0,
-            "cooldowns":                {},
-            "cpr_alert_sent":           False,
-            "cpr_alert_asian_sent":     False,
-            "news_alert_sent":          False,
-            "daily_summary_sent":       False,
-            "last_trade_close_time":    None,
-            "last_trade_close_result":  None,
-            "last_trade_entry_price":   None,
-            "last_trade_entry_time":    None,
-            "last_trade_entry_score":   0,
-            "last_trade_entry_direction": "",
-            "asian_trades_today":       0,
-            "main_trades_today":        0,
-        }
-        with open(trade_log, "w") as f:
-            json.dump(today, f, indent=2)
-        log.info("New day! Start balance: $" + str(round(current_balance, 2)))
-
-    start_balance = today.get("start_balance", current_balance)
-    open_pnl      = 0.0
-    for _n in ASSETS:
-        _pos = trader.get_position(_n)
-        if _pos:
-            open_pnl += trader.check_pnl(_pos)
-    realized_pnl = current_balance - start_balance
-    pl_sgd       = realized_pnl * 1.35
-    pnl_emoji    = "✅" if realized_pnl >= 0 else "❌"
-
-    today["daily_pnl"] = realized_pnl
-    with open(trade_log, "w") as f:
-        json.dump(today, f, indent=2)
-
-    sync_closed_trades(trader, today, trade_log)
-
-    # FIX 7: Daily summary at 11pm SGT
-    if hour == 23 and not today.get("daily_summary_sent", False):
-        cpr_for_summary = cpr_calc.get_levels("XAU_USD")
-        send_daily_summary(alert, today, cpr_for_summary, mode)
-        today["daily_summary_sent"] = True
-        with open(trade_log, "w") as f:
-            json.dump(today, f, indent=2)
-
-    if today["trades"] >= settings["max_trades_day"]:
-        log.info("Max trades reached")
-        return
-
-    cpr_gold = cpr_calc.get_levels("XAU_USD")
-
-    send_cpr_alert = (
-        (asian and hour == 9 and not today.get("cpr_alert_asian_sent")) or
-        (london_open and hour == 14 and not today.get("cpr_alert_sent"))
-    )
-    if send_cpr_alert:
-        session_label = "Asian Open" if asian else "London Open"
-        cpr_msg = "🌅 GOLD BOT — " + session_label + " CPR Levels\n"
-        if cpr_gold:
-            narrow_flag = " NARROW — TRENDING DAY!" if cpr_gold["is_narrow"] else ""
-            wide_flag   = " WIDE — CHOPPY" if cpr_gold["is_wide"] else ""
-            cpr_msg += (
-                "🥇 GOLD CPR" + narrow_flag + wide_flag + "\n"
-                "TC=" + str(cpr_gold["tc"]) + " BC=" + str(cpr_gold["bc"]) +
-                " Pivot=" + str(cpr_gold["pivot"]) + "\n"
-                "R1=" + str(cpr_gold["r1"]) + " S1=" + str(cpr_gold["s1"]) +
-                " Width=" + str(cpr_gold["width_pct"]) + "%"
+        api_key    = os.environ.get("OANDA_API_KEY", "")
+        account_id = os.environ.get("OANDA_ACCOUNT_ID", "")
+        if not api_key or not account_id:
+            msg = (
+                "❌ Login FAILED — Missing Env Vars!\n"
+                "OANDA_API_KEY: " + ("✅ SET" if api_key else "❌ MISSING") + "\n"
+                "OANDA_ACCOUNT_ID: " + ("✅ SET" if account_id else "❌ MISSING") + "\n"
+                "→ Go to Railway → Variables and set both!"
             )
-        alert.send(cpr_msg)
-        if asian:
-            today["cpr_alert_asian_sent"] = True
         else:
-            today["cpr_alert_sent"] = True
-        with open(trade_log, "w") as f:
-            json.dump(today, f, indent=2)
-
-    if not good_session:
-        log.info("Off-hours — sleeping silently")
+            msg = (
+                "❌ Login FAILED\n"
+                "Key: " + api_key[:8] + "****\n"
+                "Account: " + account_id + "\n"
+                "Check Railway logs for HTTP error code."
+            )
+        # Always alert on login fail — this is critical regardless of session
+        alert.send(msg)
         return
 
-    calendar     = EconomicCalendar()
-    news_summary = calendar.get_today_summary()
-    if "No high" not in news_summary and not today.get("news_alert_sent"):
-        alert.send("⚠️ NEWS ALERT!\n" + news_summary + "\nCPR levels often break around news!")
-        today["news_alert_sent"] = True
-        with open(trade_log, "w") as f:
-            json.dump(today, f, indent=2)
+    current_balance = trader.get_balance()
 
-    signals      = SignalEngine(demo=settings["demo_mode"])
-    scan_results = []
-    score        = -1
-    direction    = ""
+    if "start_balance" not in state or state["start_balance"] == 0.0:
+        state["start_balance"] = current_balance
 
-    for name, config in ASSETS.items():
-        if not settings.get(config["setting"], True):
+    realized_pnl = round(current_balance - state["start_balance"], 2)
+    pl_sgd       = round(realized_pnl * USD_SGD, 2)
+
+    detect_sl_tp_hits(state, trader, alert)
+
+    # ── 15-MIN HARD CLOSE ──────────────────────────────────────────────
+    for name in ASSETS:
+        pos = trader.get_position(name)
+        if not pos:
             continue
-        if today["trades"] >= settings["max_trades_day"]:
-            break
-
-        position = trader.get_position(name)
-        if position:
-            pnl     = trader.check_pnl(position)
-            pos_dir = "BUY" if int(float(position["long"]["units"])) > 0 else "SELL"
-            emoji   = "📈" if pnl > 0 else "📉"
-            scan_results.append(config["emoji"] + " " + name + ": " + pos_dir +
-                                 " open " + emoji + " $" + str(round(pnl, 2)))
-            continue
-
-        session_hours = config.get("session_hours", [(14, 23)])
-        pair_ok       = any(s <= hour <= e for (s, e) in session_hours)
-        if not pair_ok:
-            scan_results.append(config["emoji"] + " " + name + ": off-session")
-            continue
-
-        is_asian_gold = asian and name == "XAU_USD"
-
-        if is_asian_gold and not settings.get("trade_gold_asian", True):
-            scan_results.append(config["emoji"] + " " + name + ": Asian disabled")
-            continue
-
-        if is_asian_gold:
-            cap          = settings.get("max_trades_asian", 999)
-            asian_trades = today.get("asian_trades_today", 0)
-            if asian_trades >= cap:
-                scan_results.append(config["emoji"] + " " + name + ": Asian cap reached")
+        try:
+            trade_id, open_str = trader.get_open_trade_id(name)
+            if not trade_id or not open_str:
                 continue
-        else:
-            cap         = settings.get("max_trades_main", 999)
-            main_trades = today.get("main_trades_today", 0)
-            if main_trades >= cap:
-                scan_results.append(config["emoji"] + " " + name + ": Main cap reached")
-                continue
+            open_utc = datetime.fromisoformat(open_str.replace("Z", "+00:00"))
+            mins     = (datetime.now(pytz.utc) - open_utc).total_seconds() / 60
+            log.info(name + ": open " + str(round(mins, 1)) + " min")
+            if mins >= MAX_DURATION:
+                pnl     = trader.check_pnl(pos)
+                pnl_sgd = round(pnl * USD_SGD, 2)
+                trader.close_position(name)
+                state.get("open_times", {}).pop(name, None)
+                alert.send(
+                    "⏰ 15-MIN TIMEOUT\n"
+                    + ASSETS[name]["emoji"] + " " + name + "\n"
+                    "Closed at " + str(round(mins, 1)) + " min\n"
+                    "PnL: $" + str(round(pnl, 2)) + " USD " + ("✅" if pnl >= 0 else "🔴") + "\n"
+                    "   ≈ SGD " + str(pnl_sgd)
+                )
+        except Exception as e:
+            log.warning("Duration check " + name + ": " + str(e))
 
-        # ══════════════════════════════════════════════════════
-        # RE-ENTRY GUARD — FIX 3 + FIX 6
-        # ══════════════════════════════════════════════════════
-        last_entry_time      = today.get("last_trade_entry_time")
-        last_entry_score     = today.get("last_trade_entry_score", 0)
-        last_entry_direction = today.get("last_trade_entry_direction", "")
-        last_entry_price     = today.get("last_trade_entry_price") or 0
-        now_utc              = datetime.utcnow()
+    # ── SCAN + TRADE ────────────────────────────────────────────────────
+    threshold = settings.get("signal_threshold", 4)
 
-        # FIX 3: Hard 10-min duplicate lock
-        if last_entry_time:
-            try:
-                entry_dt  = datetime.strptime(last_entry_time[:16].replace("T", " "), "%Y-%m-%d %H:%M")
-                mins_since = (now_utc - entry_dt).total_seconds() / 60
-                if mins_since < 10:
-                    remaining = int(10 - mins_since)
-                    scan_results.append(config["emoji"] + " " + name +
-                        ": 🔒 Duplicate lock — " + str(remaining) + " min remaining")
-                    log.info(name + " duplicate lock — " + str(round(mins_since, 1)) + " min since last order")
-                    continue
-            except Exception as e:
-                log.warning("Duplicate lock error: " + str(e))
+    for name, cfg in ASSETS.items():
+        if not is_in_session(hour, cfg):
+            log.info(name + ": off-session"); continue
 
-        max_spread            = settings.get("max_spread_gold_asian", 999) if is_asian_gold else settings.get("max_spread_gold", 999)
-        spread_ok, spread_val = check_spread(trader, name, max_spread, config["pip"])
+        pos = trader.get_position(name)
+        if pos:
+            pnl_sgd = round(trader.check_pnl(pos) * USD_SGD, 2)
+            dirn    = "BUY" if int(float(pos.get("long", {}).get("units", 0))) > 0 else "SELL"
+            log.info(name + ": " + dirn + " open SGD " + str(pnl_sgd))
+            continue
+
+        if in_cooldown(state, name):
+            remaining = cooldown_remaining(state, name)
+            log.info(name + ": cooldown " + str(remaining) + "min"); continue
+
+        price, bid, ask = trader.get_price(name)
+        if price is None:
+            log.warning(name + ": price error"); continue
+
+        spread = (ask - bid) / cfg["pip"]
+        if spread > cfg["max_spread"]:
+            log.info(name + ": spread " + str(round(spread, 2)) + "p > " + str(cfg["max_spread"]) + "p skip"); continue
 
         news_active, news_reason = calendar.is_news_time(name)
         if news_active:
-            scan_results.append(config["emoji"] + " " + name + ": PAUSED — " + news_reason)
-            continue
+            alert_key = name + "_news_" + now.strftime("%Y%m%d%H")
+            if not state.get("news_alerted", {}).get(alert_key):
+                if "news_alerted" not in state:
+                    state["news_alerted"] = {}
+                state["news_alerted"][alert_key] = True
+                alert.send("⚠️ NEWS BLOCK\n" + cfg["emoji"] + " " + name + "\n" + news_reason + "\nSkipping this hour")
+            log.info(name + ": news — " + news_reason); continue
 
-        asset_key = "XAUUSD_ASIAN" if is_asian_gold else config["asset"]
-        threshold = settings.get("signal_threshold_asian", 4) if is_asian_gold else settings["signal_threshold"]
-
-        # Single analyze() call — result reused for both re-entry guard and trade logic
-        score, direction, details = signals.analyze(asset=asset_key)
-        log.info(name + ": score=" + str(score) + " dir=" + direction + " | " + details)
-
-        if not spread_ok:
-            scan_results.append(config["emoji"] + " " + name +
-                ": Spread " + str(round(spread_val, 1)) + " pips | Score: " + str(score) + "/7")
-            continue
-
-        # FIX 6: Smart re-entry rules (uses already-fetched score/direction — no second API call)
-        if last_entry_time and last_entry_score > 0 and last_entry_direction:
-            try:
-                # Treat BLOCKED same as its underlying direction for same-dir check
-                peek_dir_eff  = last_entry_direction if direction == "BLOCKED" else direction
-                same_dir      = (peek_dir_eff == last_entry_direction)
-                price_now, _, _ = trader.get_price(name)
-                price_moved   = (abs((price_now or 0) - last_entry_price) / config["pip"]) >= 500 if last_entry_price else False
-
-                log.info(name + " re-entry | last=" + last_entry_direction + "@" + str(last_entry_score) +
-                         " now=" + direction + "@" + str(score) +
-                         " same=" + str(same_dir) + " moved=" + str(price_moved))
-
-                if same_dir and score <= last_entry_score and not price_moved:
-                    scan_results.append(config["emoji"] + " " + name +
-                        ": 🚫 Chasing — same " + last_entry_direction +
-                        " score " + str(score) + " <= " + str(last_entry_score))
-                    continue
-                elif same_dir and score >= 6:
-                    log.info(name + " ALLOWED — stronger score " + str(score))
-                    today["last_trade_entry_score"]     = 0
-                    today["last_trade_entry_direction"] = ""
-                elif not same_dir and score >= 5 and direction not in ("NONE", "BLOCKED"):
-                    log.info(name + " ALLOWED — direction flip to " + direction)
-                    today["last_trade_entry_score"]     = 0
-                    today["last_trade_entry_direction"] = ""
-                elif price_moved and score >= 5:
-                    log.info(name + " ALLOWED — new zone 500p+")
-                    today["last_trade_entry_score"]     = 0
-                    today["last_trade_entry_direction"] = ""
-                else:
-                    reason = ("same dir " + str(score) + "/7" if same_dir
-                              else direction + " score=" + str(score) + "/7 < 5")
-                    scan_results.append(config["emoji"] + " " + name +
-                        ": ⏳ Re-entry blocked — " + reason)
-                    continue
-
-                with open(trade_log, "w") as f:
-                    json.dump(today, f, indent=2)
-
-            except Exception as e:
-                log.warning("Re-entry guard error: " + str(e))
-
-        # ── BLOCKED: London/NY H4 hard block ─────────────────────────────────
-        # Show full score info in scan summary; main scan alert handles Telegram.
-        if direction == "BLOCKED":
-            scan_results.append(
-                config["emoji"] + " " + name + ": 🚫 H4 blocked | " + str(score) + "/7"
-            )
-            # details already contains the full breakdown — let main scan alert send it
-            # (do NOT send a separate alert here; avoids double-message every 5 min)
-            continue
-
-        # ── Asian watching state ──────────────────────────────────────────────
-        # direction == "NONE" with score >= 1 means price is in CPR or H4 blocked
-        # After signals.py fix, Asian H4 conflict = -1pt penalty + direction stays BUY/SELL
-        # So "NONE" here genuinely means price is inside CPR (no breakout yet)
-        if is_asian_gold and score == 0 and direction == "NONE":
-            scan_results.append(config["emoji"] + " " + name + ": Inside CPR — watching")
-            continue
+        score, direction, details = signals.analyze(asset=cfg["asset"])
+        log.info(name + ": score=" + str(score) + "/" + str(threshold) +
+                 " dir=" + direction + " | " + details)
 
         if score < threshold or direction == "NONE":
-            scan_results.append(config["emoji"] + " " + name + ": " + str(score) + "/7 — no setup yet")
-            continue
+            log.info(name + ": no setup — waiting"); continue
 
-        cpr_levels = cpr_calc.get_levels(config["instrument"])
-        is_wide    = cpr_levels.get("is_wide", False) if cpr_levels else False
-
-        price, _, _ = trader.get_price(name)
-        raw_atr     = get_atr_pips(trader, name, config["pip"], multiplier=1.0)
-        pip         = config["pip"]
-
-        # ── SL: target 1500p, ATR-clamped 1200–1800p for market conditions ──
-        SL_TARGET = 1500
-        SL_MIN    = 1200
-        SL_MAX    = 1800
-        stop_pips = max(SL_MIN, min(raw_atr, SL_MAX)) if raw_atr else SL_TARGET
-
-        size = calc_position_size(current_balance, stop_pips, pip, score, price)
-
-        # ── TP: target 3500p, CPR dynamic override if well-placed ──
-        TP_TARGET = 3500
-        tp_pips   = TP_TARGET
-        tp_label  = "Fixed 3500p (1:2.3+ R:R)"
-        if cpr_levels and price:
-            r1           = cpr_levels.get("r1", 0)
-            s1           = cpr_levels.get("s1", 0)
-            target_level = r1 if direction == "BUY" else s1
-            if target_level:
-                dist = abs(target_level - price) / pip
-                # Accept CPR target only if it lands between 2× and 3× SL (quality zone)
-                if stop_pips * 2.0 <= dist <= stop_pips * 3.0:
-                    tp_pips  = int(dist)
-                    tp_label = ("R1=" + str(r1) if direction == "BUY" else "S1=" + str(s1)) + " (dynamic)"
-
-        rr = tp_pips / stop_pips
-        if rr < 2.0:
-            scan_results.append(config["emoji"] + " " + name + ": R:R=" + str(round(rr, 1)) + " < 1:2 skip")
-            continue
-
-        max_loss   = round(size * stop_pips * pip, 2)
-        max_profit = round(size * tp_pips   * pip, 2)
-
-        try:
-            mr = requests.get(trader.base_url + "/v3/accounts/" + trader.account_id,
-                              headers=trader.headers, timeout=10)
-            if mr.status_code == 200:
-                acct      = mr.json().get("account", {})
-                margin_av = float(acct.get("marginAvailable", current_balance))
-                max_units = int((margin_av * 0.8) / (price * 0.05)) if price else size
-                if max_units < 1:
-                    scan_results.append(config["emoji"] + " " + name + ": Insufficient margin")
-                    continue
-                if size > max_units:
-                    size = max_units
-        except Exception as _me:
-            log.warning("Margin check error: " + str(_me))
+        # ── Place trade ────────────────────────────────────────────────
+        sl_sgd = round(TRADE_SIZE * SL_PIPS * cfg["pip"] * USD_SGD, 2)
+        tp_sgd = round(TRADE_SIZE * TP_PIPS * cfg["pip"] * USD_SGD, 2)
 
         result = trader.place_order(
-            instrument     = name,
-            direction      = direction,
-            size           = size,
-            stop_distance  = stop_pips,
-            limit_distance = tp_pips
+            instrument=name, direction=direction, size=TRADE_SIZE,
+            stop_distance=SL_PIPS, limit_distance=TP_PIPS
         )
-
         if result["success"]:
-            today["trades"]                    += 1
-            today["consec_losses"]              = 0
-            today["breakeven_" + name]          = False
-            today["last_trade_entry_price"]     = price
-            today["last_trade_entry_time"]      = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
-            today["last_trade_entry_score"]     = score
-            today["last_trade_entry_direction"] = direction
-            if is_asian_gold:
-                today["asian_trades_today"] = today.get("asian_trades_today", 0) + 1
-            else:
-                today["main_trades_today"]  = today.get("main_trades_today", 0) + 1
-
-            with open(trade_log, "w") as f:
-                json.dump(today, f, indent=2)
-
-            cpr_summary = (
-                "TC=" + str(cpr_levels["tc"]) + " BC=" + str(cpr_levels["bc"]) +
-                " Pivot=" + str(cpr_levels["pivot"]) + "\n" +
-                "R1=" + str(cpr_levels["r1"]) + " S1=" + str(cpr_levels["s1"]) +
-                " Width=" + str(cpr_levels["width_pct"]) + "%"
-            ) if cpr_levels else "CPR: unavailable"
-
-            size_note = " (wide CPR)" if is_wide else ""
+            state["trades"] = state.get("trades", 0) + 1
+            if "open_times" not in state:
+                state["open_times"] = {}
+            state["open_times"][name] = now.isoformat()
+            price, _, _ = trader.get_price(name)
             alert.send(
-                "🥇 GOLD TRADE! " + mode + "\n"
-                + config["emoji"] + " " + name + "\n"
+                "🔄 NEW TRADE!\n"
+                + cfg["emoji"] + " " + name + "\n"
                 "Direction: " + direction + "\n"
-                "Score:    " + str(score) + "/7\n"
-                "Entry:    " + str(round(price, config["precision"])) + "\n"
-                "Size:     " + str(size) + " units" + size_note + "\n"
-                "Stop:     " + str(stop_pips) + "p = $" + str(max_loss) + "\n"
-                "Target:   " + str(tp_pips) + "p = $" + str(max_profit) + " (" + tp_label + ")\n"
-                "R:R:      1:" + str(round(tp_pips / stop_pips, 1)) + "\n"
-                "Spread:   " + str(round(spread_val, 1)) + "p\n"
-                "Trade #"   + str(today["trades"]) + "/" + str(settings["max_trades_day"]) + "\n"
-                "Session:  " + session + "\n"
-                "--- CPR ---\n" + cpr_summary + "\n"
-                "--- Signals ---\n" + details.replace(" | ", "\n")
+                "Score:     " + str(score) + "/" + str(threshold) + " ✅\n"
+                "Size:      74,000 units\n"
+                "Entry:     " + str(round(price, cfg["precision"])) + "\n"
+                "SL:        " + str(SL_PIPS) + " pips ≈ SGD " + str(sl_sgd) + "\n"
+                "TP:        " + str(TP_PIPS) + " pips ≈ SGD " + str(tp_sgd) + "\n"
+                "Max Time:  30 min\n"
+                "Spread:    " + str(round(spread, 2)) + "p\n"
+                "Signals:   " + details
             )
-            scan_results.append(config["emoji"] + " " + name + ": " + direction + " PLACED! " + str(score) + "/7")
+            log.info(name + ": PLACED " + direction +
+                     " SGD SL=" + str(sl_sgd) + " TP=" + str(tp_sgd))
         else:
-            log.warning(name + " order failed: " + str(result.get("error", "")))
-            scan_results.append(config["emoji"] + " " + name + ": order failed — " + str(result.get("error", ""))[:50])
+            set_cooldown(state, name)
+            log.warning(name + ": order failed — " + str(result.get("error", "")))
 
-    target_hit = realized_pnl >= 22
-    if target_hit:
-        target_msg = "TARGET HIT! $" + str(round(pl_sgd, 0)) + " SGD today!"
-    elif realized_pnl > 0:
-        target_msg = "Profit $" + str(round(pl_sgd, 0)) + " SGD"
-    elif realized_pnl < 0:
-        target_msg = "Loss $" + str(abs(round(pl_sgd, 0))) + " SGD"
-    else:
-        target_msg = "Scanning for setups..."
-
-    summary  = "\n".join(scan_results) if scan_results else "No setups this scan"
-    wins     = today.get("wins", 0)
-    losses   = today.get("losses", 0)
-    cpr_line = ""
-    if cpr_gold:
-        w_flag   = " NARROW" if cpr_gold["is_narrow"] else (" WIDE" if cpr_gold["is_wide"] else "")
-        cpr_line = (
-            "CPR Width: " + str(cpr_gold["width_pct"]) + "%" + w_flag + "\n"
-            "TC=" + str(cpr_gold["tc"]) + " BC=" + str(cpr_gold["bc"]) + "\n"
-            "R1=" + str(cpr_gold["r1"]) + " S1=" + str(cpr_gold["s1"]) + "\n"
-        )
-
-    threshold_used    = settings.get("signal_threshold_asian", 4) if asian else settings["signal_threshold"]
-    trade_just_placed = any("PLACED" in r for r in scan_results)
-    last_alert_min    = today.get("last_scan_alert_min", -61)
-    last_alert_score  = today.get("last_alert_score", -1)
-    last_alert_dir    = today.get("last_alert_direction", "")
-    current_min       = now.hour * 60 + now.minute
-    mins_since_alert  = current_min - last_alert_min if current_min >= last_alert_min else current_min + 1440 - last_alert_min
-    score_changed     = (score != last_alert_score or direction != last_alert_dir)
-    should_alert      = trade_just_placed or score_changed or mins_since_alert >= 60
-
-    if should_alert:
-        today["last_scan_alert_min"]  = current_min
-        today["last_alert_score"]     = score
-        today["last_alert_direction"] = direction
-        with open(trade_log, "w") as f:
-            json.dump(today, f, indent=2)
-
-        # Build signal detail block — shown when there's a real signal or block to report
-        signal_detail = ""
-        if score > 0 and details:
-            signal_detail = "--- Signals ---\n" + details.replace(" | ", "\n") + "\n"
-
-        alert.send(
-            "🥇 GOLD BOT Scan! " + mode + "\n"
-            "Time: " + now.strftime("%H:%M SGT") + " | " + session + "\n"
-            "Balance: $" + str(round(current_balance, 2)) +
-            " | Realized: $" + str(round(realized_pnl, 2)) + " " + pnl_emoji + "\n"
-            "Trades: " + str(today["trades"]) + "/" + str(settings["max_trades_day"]) +
-            " | W/L: " + str(wins) + "/" + str(losses) + "\n"
-            "Need: " + str(threshold_used) + "/7 to trade\n"
-            + target_msg + "\n"
-            "-------------------------\n"
-            + cpr_line +
-            "--- Setups ---\n"
-            + summary + "\n"
-            + signal_detail
-        )
-    else:
-        log.info("Scan silent — next alert in " + str(60 - mins_since_alert) + " mins")
+    log.info("Scan complete.")
 
 
 if __name__ == "__main__":
-    log.info("🥇 GOLD BOT starting — scanning every 5 minutes via Railway...")
+    log.info("🚀 GBP/USD London Scalp | SL=13pip(~SGD130) TP=26pip(~SGD260) | 15min max | 15:00-24:00 SGT")
+    local_state = {
+        "date": datetime.now(sg_tz).strftime("%Y%m%d"),
+        "trades": 0, "start_balance": 0.0,
+        "wins": 0, "losses": 0, "consec_losses": 0,
+        "cooldowns": {}, "open_times": {}, "news_alerted": {},
+    }
     while True:
         try:
-            run_bot()
+            run_bot(state=local_state)
         except Exception as e:
             log.error("Bot error: " + str(e))
-        log.info("Sleeping 5 minutes...")
-        time.sleep(300)
+        time.sleep(60)
