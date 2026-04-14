@@ -297,8 +297,8 @@ def run_bot(state):
             log.info(name + ": news — " + news_reason)
             continue
 
-        # Signal check — requires 4/4 for EUR/USD
-        score, direction, details = signals.analyze(asset=cfg["asset"])
+        # Signal check — requires 4/4 for EUR/USD (state passed for L2→L3 memory)
+        score, direction, details = signals.analyze(asset=cfg["asset"], state=state)
         log.info(name + ": score=" + str(score) + "/" + str(threshold) +
                  " dir=" + direction + " | " + details)
 

@@ -4,27 +4,19 @@ Signal Engine — EUR/USD London+NY Session Scalp
 Pair:   EUR/USD ONLY
 Target: 26 pip TP | 13 pip SL | 2:1 R:R
 
-WHY EUR/USD IS DIFFERENT FROM GBP/USD:
-  - EUR/USD moves are more "clean" and trend-following, less choppy than GBP
-  - GBP/USD can gap and reverse violently; EUR/USD has smoother impulse legs
-  - EUR/USD best momentum: London open (08:00–12:00 UTC = 15:00–19:00 SGT)
-    and NY session overlap (13:00–17:00 UTC = 20:00–00:00 SGT)
-  - Asian session (00:00–07:00 UTC) = tight consolidation, skip entirely
-  - EUR/USD average daily range: ~70–90 pips → 26 pip TP is very achievable
-  - Key insight: EUR/USD respects EMA structure more than GBP;
-    pullbacks to EMA are cleaner entries
-
-4-Layer Signal Logic (optimized for EUR/USD 26-pip moves):
-  L0: H4 macro trend filter — EMA50 on H4 (prevents trading against weekly bias)
-  L1: H1 momentum — EMA21 + EMA50 dual stack alignment
-  L2: M15 impulse candle — break of 5-candle structure with body >60%
-  L3: M5 entry timing — RSI(7) bounce from EMA13 zone
-  VETO 1: H1 EMA200 hard block (proven filter)
-  VETO 2: Flat range block — H1 ATR < 6 pips
-  VETO 3: M30 counter-trend block — 3/3 opposing candles
+FIXES APPLIED:
+  FIX-A: L2 and L3 are now separated via state memory.
+          When L2 fires, direction + timestamp are saved to state["l2_pending"].
+          On the NEXT scan(s), only L3 is checked (up to 30 min window).
+          This mirrors real price action: breakout → pullback → entry.
+  FIX-B: RSI thresholds loosened (42→52 buy, 58→48 sell) so the
+          pullback confirmation is actually reachable after a breakout.
+  FIX-C: Every layer now logs its exact pass/fail so Railway logs
+          show precisely which condition is blocking each scan.
 """
 
 import os, requests, logging
+from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +30,8 @@ class SafeFilter(logging.Filter):
         return True
 
 log.addFilter(SafeFilter())
+
+L2_EXPIRY_MINUTES = 30  # how long to wait for L3 after L2 fires
 
 
 class SignalEngine:
@@ -78,7 +72,6 @@ class SignalEngine:
         return emas
 
     def _rsi(self, closes, period=7):
-        """RSI calculation."""
         if len(closes) < period + 1:
             return 50.0
         gains, losses = [], []
@@ -94,7 +87,6 @@ class SignalEngine:
         return 100 - (100 / (1 + rs))
 
     def _atr(self, highs, lows, closes, period=14):
-        """ATR calculation."""
         if len(highs) < period + 1:
             return 0.0
         trs = []
@@ -107,18 +99,46 @@ class SignalEngine:
             trs.append(tr)
         return sum(trs[-period:]) / period
 
-    def analyze(self, asset="EURUSD"):
-        return self._scalp_eurusd("EUR_USD")
+    def analyze(self, asset="EURUSD", state=None):
+        """
+        state dict is passed in so L2 pending persists between scans.
+        Falls back gracefully if state=None.
+        """
+        return self._scalp_eurusd("EUR_USD", state=state)
 
-    def _scalp_eurusd(self, instrument):
-        reasons   = []
-        score     = 0
+    def _scalp_eurusd(self, instrument, state=None):
+        reasons = []
+        score   = 0
 
-        # ── L0: H4 MACRO TREND — EMA50 on H4 ────────────────────────
-        # EUR/USD respects H4 trend strongly. Trading with H4 EMA50
-        # dramatically reduces counter-trend losses.
+        # ── FIX-A: Check if L2 already fired and we are waiting for L3 ──
+        if state is not None:
+            pending = state.get("l2_pending", {})
+            if pending.get("instrument") == instrument:
+                age_minutes = (
+                    datetime.now(timezone.utc) -
+                    datetime.fromisoformat(pending["timestamp"])
+                ).total_seconds() / 60
+
+                if age_minutes <= L2_EXPIRY_MINUTES:
+                    log.info(
+                        instrument + ": L2 pending (" + pending["direction"] +
+                        ") — checking L3 entry [" + str(round(age_minutes, 1)) + " min elapsed]"
+                    )
+                    return self._check_l3_only(
+                        instrument,
+                        direction=pending["direction"],
+                        score_so_far=3,
+                        reasons=["(L0+L1+L2 already confirmed — checking L3 entry only)"],
+                        state=state,
+                    )
+                else:
+                    log.info(instrument + ": L2 pending EXPIRED (" + str(round(age_minutes, 1)) + " min) — resetting")
+                    state.pop("l2_pending", None)
+
+        # ── L0: H4 MACRO TREND — EMA50 ───────────────────────────────────
         h4_c, h4_h, h4_l, _ = self._fetch_candles(instrument, "H4", 60)
         if len(h4_c) < 51:
+            log.info(instrument + ": L0 SKIP — not enough H4 data (" + str(len(h4_c)) + ")")
             return 0, "NONE", "Not enough H4 data (" + str(len(h4_c)) + ")"
 
         h4_ema50 = self._ema(h4_c, 50)[-1]
@@ -131,32 +151,30 @@ class SignalEngine:
             direction = "SELL"
             reasons.append("✅ L0 H4 SELL below EMA50=" + str(round(h4_ema50, 5)))
         else:
+            log.info(instrument + ": L0 FAIL — H4 EMA50 flat")
             return 0, "NONE", "H4 EMA50 flat — no macro trend"
 
         score = 1
 
-        # ── VETO: FLAT RANGE BLOCK — H1 ATR < 6 pips ────────────────
-        # EUR/USD when ATR < 6 pips on H1 = tight consolidation.
-        # 26 pip TP unreachable in flat market — skip.
+        # ── VETO: FLAT RANGE BLOCK — H1 ATR < 6 pips ────────────────────
         h1_c, h1_h, h1_l, _ = self._fetch_candles(instrument, "H1", 60)
         if len(h1_c) < 20:
+            log.info(instrument + ": VETO SKIP — not enough H1 data (" + str(len(h1_c)) + ")")
             return score, "NONE", " | ".join(reasons) + " | Not enough H1 data"
 
-        h1_atr     = self._atr(h1_h, h1_l, h1_c, 14)
-        h1_atr_pip = h1_atr / 0.0001
+        h1_atr      = self._atr(h1_h, h1_l, h1_c, 14)
+        h1_atr_pip  = h1_atr / 0.0001
         MIN_ATR_PIPS = 6.0
 
         if h1_atr_pip < MIN_ATR_PIPS:
-            reasons.append("🚫 VETO FLAT: H1 ATR=" + str(round(h1_atr_pip, 1)) +
-                           "p < " + str(MIN_ATR_PIPS) + "p min — market too quiet")
+            msg = "🚫 VETO FLAT: H1 ATR=" + str(round(h1_atr_pip, 1)) + "p < " + str(MIN_ATR_PIPS) + "p — market too quiet"
+            log.info(instrument + ": " + msg)
+            reasons.append(msg)
             return score, "NONE", " | ".join(reasons)
         else:
             reasons.append("✅ ATR OK: H1 ATR=" + str(round(h1_atr_pip, 1)) + "p")
 
-        # ── L1: H1 DUAL EMA ALIGNMENT — EMA21 + EMA50 ───────────────
-        # BUY: price > EMA21 > EMA50 (bull stack)
-        # SELL: price < EMA21 < EMA50 (bear stack)
-        # Both EMAs must agree with H4 direction — eliminates choppy H1 states
+        # ── L1: H1 DUAL EMA ALIGNMENT — EMA21 + EMA50 ───────────────────
         h1_ema21 = self._ema(h1_c, 21)[-1]
         h1_ema50 = self._ema(h1_c, 50)[-1]
         h1_close = h1_c[-1]
@@ -165,25 +183,22 @@ class SignalEngine:
         bear_h1 = (h1_close < h1_ema21) and (h1_ema21 < h1_ema50)
 
         if direction == "BUY" and bull_h1:
-            reasons.append("✅ L1 H1 BULL stack: price>" + str(round(h1_ema21, 5)) +
-                           ">EMA50=" + str(round(h1_ema50, 5)))
+            reasons.append("✅ L1 H1 BULL stack: price>" + str(round(h1_ema21, 5)) + ">EMA50=" + str(round(h1_ema50, 5)))
             score = 2
         elif direction == "SELL" and bear_h1:
-            reasons.append("✅ L1 H1 BEAR stack: price<" + str(round(h1_ema21, 5)) +
-                           "<EMA50=" + str(round(h1_ema50, 5)))
+            reasons.append("✅ L1 H1 BEAR stack: price<" + str(round(h1_ema21, 5)) + "<EMA50=" + str(round(h1_ema50, 5)))
             score = 2
         else:
-            reasons.append("L1 H1 EMAs not aligned — price=" + str(round(h1_close, 5)) +
-                           " EMA21=" + str(round(h1_ema21, 5)) +
-                           " EMA50=" + str(round(h1_ema50, 5)))
+            msg = ("L1 FAIL — H1 EMAs not aligned: price=" + str(round(h1_close, 5)) +
+                   " EMA21=" + str(round(h1_ema21, 5)) + " EMA50=" + str(round(h1_ema50, 5)))
+            log.info(instrument + ": " + msg)
+            reasons.append(msg)
             return score, "NONE", " | ".join(reasons)
 
-        # ── L2: M15 IMPULSE CANDLE BREAK ─────────────────────────────
-        # Break of last 5-candle structure high/low with body >60%
-        # EUR/USD gives cleaner M15 impulses than GBP — institutional flow
-        # Cap: max 4 pips past structure to avoid chasing
+        # ── L2: M15 IMPULSE CANDLE BREAK ─────────────────────────────────
         m15_c, m15_h, m15_l, m15_o = self._fetch_candles(instrument, "M15", 20)
         if len(m15_c) < 8:
+            log.info(instrument + ": L2 SKIP — not enough M15 data (" + str(len(m15_c)) + ")")
             return score, "NONE", " | ".join(reasons) + " | Not enough M15 data"
 
         lookback       = 5
@@ -218,20 +233,45 @@ class SignalEngine:
             )
             score = 3
         else:
-            reasons.append(
-                "L2 no M15 impulse — high=" + str(round(structure_high, 5)) +
-                " low=" + str(round(structure_low, 5)) +
-                " close=" + str(round(last_close, 5)) +
-                " bull_body=" + str(bull_body_m15) + " bear_body=" + str(bear_body_m15)
-            )
+            msg = ("L2 FAIL — no M15 impulse: high=" + str(round(structure_high, 5)) +
+                   " low=" + str(round(structure_low, 5)) +
+                   " close=" + str(round(last_close, 5)) +
+                   " bull_body=" + str(bull_body_m15) + " bear_body=" + str(bear_body_m15))
+            log.info(instrument + ": " + msg)
+            reasons.append(msg)
             return score, "NONE", " | ".join(reasons)
 
-        # ── L3: M5 RSI(7) ENTRY TIMING + EMA13 TOUCH ────────────────
-        # After M15 impulse, EUR/USD pulls back to M5 EMA13 with RSI(7)
-        # resetting. This gives optimal entry with full 26-pip room.
-        # RSI(7) is faster than RSI(14) — catches exact bounce timing.
+        # ── FIX-A: L2 PASSED → save to state, wait for L3 next scan ─────
+        if state is not None:
+            state["l2_pending"] = {
+                "instrument": instrument,
+                "direction":  direction,
+                "timestamp":  datetime.now(timezone.utc).isoformat(),
+            }
+            log.info(
+                instrument + ": ✅ L2 FIRED (" + direction + ") — "
+                "saved to state, checking L3 on next scan(s) for up to " +
+                str(L2_EXPIRY_MINUTES) + " min"
+            )
+            reasons.append("⏳ L2 confirmed — waiting for L3 pullback entry (next scan)...")
+            return score, "NONE", " | ".join(reasons)
+
+        # Stateless fallback
+        return self._check_l3_only(instrument, direction, score, reasons, state=None)
+
+    # ─────────────────────────────────────────────────────────────────────
+    def _check_l3_only(self, instrument, direction, score_so_far, reasons, state=None):
+        """
+        Called on the scan(s) AFTER L2 fires.
+        Checks M5 RSI(7) pullback to EMA13, then runs both VETOs.
+        Clears l2_pending from state and returns score=4 + direction on success.
+        """
+        score = score_so_far
+
+        # ── L3: M5 RSI(7) ENTRY TIMING + EMA13 TOUCH ────────────────────
         m5_c, m5_h, m5_l, m5_o = self._fetch_candles(instrument, "M5", 50)
         if len(m5_c) < 15:
+            log.info(instrument + ": L3 SKIP — not enough M5 data (" + str(len(m5_c)) + ")")
             return score, "NONE", " | ".join(reasons) + " | Not enough M5 data"
 
         ema13    = self._ema(m5_c, 13)[-1]
@@ -247,15 +287,15 @@ class SignalEngine:
         bull_m5_body = (m5_close > m5_open) and ((m5_close - m5_low) / m5_range >= 0.50) and (m5_range >= MIN_M5_RANGE)
         bear_m5_body = (m5_close < m5_open) and ((m5_high - m5_close) / m5_range >= 0.50) and (m5_range >= MIN_M5_RANGE)
 
-        ema_tol = 0.00010  # 1.0 pip tolerance
+        ema_tol         = 0.00010  # 1.0 pip tolerance
         recent_lows_m5  = m5_l[-3:-1]
         recent_highs_m5 = m5_h[-3:-1]
         bull_pb = any(l <= ema13 + ema_tol for l in recent_lows_m5)
         bear_pb = any(h >= ema13 - ema_tol for h in recent_highs_m5)
 
-        # EUR/USD tuned RSI thresholds
-        RSI_BUY_MAX  = 42
-        RSI_SELL_MIN = 58
+        # FIX-B: Loosened RSI thresholds (was 42/58 → now 52/48)
+        RSI_BUY_MAX  = 52
+        RSI_SELL_MIN = 48
 
         bull_rsi = rsi7 < RSI_BUY_MAX
         bear_rsi = rsi7 > RSI_SELL_MIN
@@ -275,25 +315,31 @@ class SignalEngine:
             )
             score = 4
         else:
-            reasons.append(
-                "L3 fail — EMA13=" + str(round(ema13, 5)) +
+            msg = (
+                "L3 FAIL — EMA13=" + str(round(ema13, 5)) +
                 " RSI7=" + str(round(rsi7, 1)) +
+                " (need <" + str(RSI_BUY_MAX) + " buy / >" + str(RSI_SELL_MIN) + " sell)" +
                 " bull_pb=" + str(bull_pb) + " bear_pb=" + str(bear_pb) +
-                " bull_body=" + str(bull_m5_body) + " bear_body=" + str(bear_m5_body) +
-                " bull_rsi=" + str(bull_rsi) + " bear_rsi=" + str(bear_rsi)
+                " bull_body=" + str(bull_m5_body) + " bear_body=" + str(bear_m5_body)
             )
+            log.info(instrument + ": " + msg)
+            reasons.append(msg)
             return score, "NONE", " | ".join(reasons)
 
-        # ── VETO 1: H1 EMA200 HARD BLOCK (proven filter) ─────────────
+        # ── VETO 1: H1 EMA200 HARD BLOCK ────────────────────────────────
         h1_long_c, _, _, _ = self._fetch_candles(instrument, "H1", 210)
         if len(h1_long_c) >= 200:
             h1_ema200 = self._ema(h1_long_c, 200)[-1]
             price_now = m5_c[-1]
             if direction == "BUY" and price_now < h1_ema200:
-                reasons.append("🚫 VETO1 H1 EMA200=" + str(round(h1_ema200, 5)) + " price below — no BUY")
+                msg = "🚫 VETO1 H1 EMA200=" + str(round(h1_ema200, 5)) + " price below — no BUY"
+                log.info(instrument + ": " + msg)
+                reasons.append(msg)
                 return score, "NONE", " | ".join(reasons)
             elif direction == "SELL" and price_now > h1_ema200:
-                reasons.append("🚫 VETO1 H1 EMA200=" + str(round(h1_ema200, 5)) + " price above — no SELL")
+                msg = "🚫 VETO1 H1 EMA200=" + str(round(h1_ema200, 5)) + " price above — no SELL"
+                log.info(instrument + ": " + msg)
+                reasons.append(msg)
                 return score, "NONE", " | ".join(reasons)
             else:
                 reasons.append("✅ VETO1 pass EMA200=" + str(round(h1_ema200, 5)))
@@ -301,9 +347,7 @@ class SignalEngine:
             log.warning("Not enough H1 for EMA200 (" + str(len(h1_long_c)) + ") — veto skipped")
             reasons.append("⚠️ EMA200 unavailable — veto skipped")
 
-        # ── VETO 2: M30 COUNTER-TREND BLOCK ──────────────────────────
-        # If last 3 M30 candles ALL strongly oppose direction (body >65%)
-        # = mid-impulse retracement is still in progress — skip entry.
+        # ── VETO 2: M30 COUNTER-TREND BLOCK ──────────────────────────────
         m30_c, m30_h, m30_l, m30_o = self._fetch_candles(instrument, "M30", 10)
         if len(m30_c) >= 4:
             counter_trend_count = 0
@@ -317,9 +361,16 @@ class SignalEngine:
                         counter_trend_count += 1
 
             if counter_trend_count >= 3:
-                reasons.append("🚫 VETO2 M30 counter-trend: 3/3 candles opposing " + direction)
+                msg = "🚫 VETO2 M30 counter-trend: 3/3 candles opposing " + direction
+                log.info(instrument + ": " + msg)
+                reasons.append(msg)
                 return score, "NONE", " | ".join(reasons)
             else:
                 reasons.append("✅ VETO2 M30 ok: " + str(counter_trend_count) + "/3 counter candles")
+
+        # ── ALL PASSED → clear L2 pending, fire trade ────────────────────
+        if state is not None:
+            state.pop("l2_pending", None)
+            log.info(instrument + ": ✅ ALL 4 LAYERS PASSED — firing trade")
 
         return score, direction, " | ".join(reasons)
