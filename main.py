@@ -11,7 +11,7 @@ FIX LOG (inherited from GBP bot):
   FIX-03: Startup Telegram sent so you know bot is alive
   FIX-04: Session open alert sent once per window per day
   FIX-05: Crash loop protection — 30s sleep on unhandled exception
-  FIX-06: Max 1 trade per window enforced in bot.py
+  FIX-06: No trade limit enforced in bot.py
 
 EUR/USD CHANGES:
   - Signal threshold: 4/4 (vs 3/3 for GBP — more confirmation needed)
@@ -55,7 +55,6 @@ def fresh_day_state(today_str, balance):
         "cooldowns":          {},
         "open_times":         {},
         "news_alerted":       {},
-        "windows_used":       {},
         "session_alerted":    {},
         "login_fail_alerted": {},
     }
@@ -120,7 +119,7 @@ def main():
     log.info("=" * 50)
     log.info("🚀 Railway Bot Started - OANDA EUR/USD London+NY Scalp")
     log.info("Window 1: 15:00–19:00 SGT (London) | Window 2: 20:00–00:00 SGT (NY)")
-    log.info("EUR/USD | SL=13pip | TP=26pip | Signal: 4/4 | Max 1 trade per window")
+    log.info("EUR/USD | SL=13pip | TP=26pip | Signal: 4/4 | No trade limit")
     log.info("=" * 50)
 
     if not check_env_vars():
@@ -136,7 +135,7 @@ def main():
         "Signal: 4/4 (H4+H1+M15+M5)\n"
         "Window 1: 15:00–19:00 SGT (London)\n"
         "Window 2: 20:00–00:00 SGT (NY)\n"
-        "Max 2 trades/day"
+        "No trade limit"
     )
 
     while True:

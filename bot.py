@@ -26,10 +26,10 @@ Two trading windows per day (SGT):
   Window 2 — NY Session  : 20:00–00:00 SGT  (max spread: 1.5 pip)
 
 Rules:
-  - Max 1 trade per window
-  - Max 2 trades per day total
+  - No trade limit per window
+  - No daily trade limit
   - Signal: 4/4 required (H4 trend + H1 stack + M15 impulse + M5 RSI entry)
-  - After trade in window → wait for next window
+
   - SL hit in window → cooldown 30 min then skip rest of that window
   - Max duration: 30 min then force-close
 """
@@ -201,11 +201,6 @@ def run_bot(state):
 
     log.info("Window: " + session["label"] + " | Max spread: " + str(session["max_spread"]) + " pip")
 
-    # Check if this window already used today
-    wkey = window_key(session["label"], today)
-    if state.get("windows_used", {}).get(wkey):
-        log.info(session["label"] + " window already traded today — waiting for next window")
-        return
 
     # Login
     trader = OandaTrader(demo=settings["demo_mode"])
@@ -320,9 +315,6 @@ def run_bot(state):
                 state["open_times"] = {}
             state["open_times"][name] = now.isoformat()
 
-            if "windows_used" not in state:
-                state["windows_used"] = {}
-            state["windows_used"][wkey] = True
 
             price, _, _ = trader.get_price(name)
             alert.send(
