@@ -31,7 +31,7 @@ class SafeFilter(logging.Filter):
 
 log.addFilter(SafeFilter())
 
-L2_EXPIRY_MINUTES = 30  # how long to wait for L3 after L2 fires
+L2_EXPIRY_MINUTES = 45  # how long to wait for L3 after L2 fires
 
 
 class SignalEngine:
@@ -164,7 +164,7 @@ class SignalEngine:
 
         h1_atr      = self._atr(h1_h, h1_l, h1_c, 14)
         h1_atr_pip  = h1_atr / 0.0001
-        MIN_ATR_PIPS = 6.0
+        MIN_ATR_PIPS = 4.0
 
         if h1_atr_pip < MIN_ATR_PIPS:
             msg = "🚫 VETO FLAT: H1 ATR=" + str(round(h1_atr_pip, 1)) + "p < " + str(MIN_ATR_PIPS) + "p — market too quiet"
@@ -212,11 +212,11 @@ class SignalEngine:
         last_low       = m15_l[-1]
         candle_range   = max(last_high - last_low, 0.00001)
 
-        bull_body_m15 = (last_close > last_open) and ((last_close - last_low) / candle_range >= 0.60)
-        bear_body_m15 = (last_close < last_open) and ((last_high - last_close) / candle_range >= 0.60)
+        bull_body_m15 = (last_close > last_open) and ((last_close - last_low) / candle_range >= 0.50)
+        bear_body_m15 = (last_close < last_open) and ((last_high - last_close) / candle_range >= 0.50)
 
-        bull_break = (last_close > structure_high) and (last_close <= structure_high + 0.00040) and bull_body_m15
-        bear_break = (last_close < structure_low)  and (last_close >= structure_low  - 0.00040) and bear_body_m15
+        bull_break = (last_close > structure_high) and (last_close <= structure_high + 0.00080) and bull_body_m15
+        bear_break = (last_close < structure_low)  and (last_close >= structure_low  - 0.00080) and bear_body_m15
 
         if direction == "BUY" and bull_break:
             reasons.append(
@@ -282,20 +282,20 @@ class SignalEngine:
         m5_low   = m5_l[-1]
         m5_range = max(m5_high - m5_low, 0.00001)
 
-        MIN_M5_RANGE = 0.00025  # 2.5 pips min candle
+        MIN_M5_RANGE = 0.00015  # 2.5 pips min candle
 
         bull_m5_body = (m5_close > m5_open) and ((m5_close - m5_low) / m5_range >= 0.50) and (m5_range >= MIN_M5_RANGE)
         bear_m5_body = (m5_close < m5_open) and ((m5_high - m5_close) / m5_range >= 0.50) and (m5_range >= MIN_M5_RANGE)
 
-        ema_tol         = 0.00010  # 1.0 pip tolerance
+        ema_tol         = 0.00020  # 1.0 pip tolerance
         recent_lows_m5  = m5_l[-3:-1]
         recent_highs_m5 = m5_h[-3:-1]
         bull_pb = any(l <= ema13 + ema_tol for l in recent_lows_m5)
         bear_pb = any(h >= ema13 - ema_tol for h in recent_highs_m5)
 
         # FIX-B: Loosened RSI thresholds (was 42/58 → now 52/48)
-        RSI_BUY_MAX  = 52
-        RSI_SELL_MIN = 48
+        RSI_BUY_MAX  = 58
+        RSI_SELL_MIN = 42
 
         bull_rsi = rsi7 < RSI_BUY_MAX
         bear_rsi = rsi7 > RSI_SELL_MIN
