@@ -829,32 +829,30 @@ For 1+ trade/day:
 # ═════════════════════════════════════
 # SAVE TRADE LOG (DYNAMIC PATH FIX)
 # ═════════════════════════════════════
+# ═════════════════════════════════════
+# SAVE TRADE LOG (STRICT LOCAL FIX)
+# ═════════════════════════════════════
 import os
 
-# 1. Get the directory where the script is currently running
-current_dir = os.getcwd() 
-output_dir = os.path.join(current_dir, "outputs")
+# Define the folder name relative to where you are right now
+folder_name = "outputs"
 
-# 2. Create the 'outputs' folder inside your current workspace
+# Create the folder in the current working directory
+if not os.path.exists(folder_name):
+    os.makedirs(folder_name)
+    print(f"Created local folder: {os.path.abspath(folder_name)}")
+
+# Use a relative filename
+file_path = os.path.join(folder_name, "eurusd_backtest_trades.csv")
+
 try:
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-        print(f"Created directory: {output_dir}")
+    # Save using the relative path
+    df_trades.to_csv(file_path, index=False)
+    print(f"\n✅ SUCCESS! File saved to: {file_path}")
+    print(f"Total trades recorded: {len(df_trades)}")
 except Exception as e:
-    print(f"Directory creation failed: {e}")
-
-# 3. Construct the full file path
-out_path = os.path.join(output_dir, "eurusd_backtest_trades.csv")
-
-# 4. Save the CSV
-try:
-    df_trades.to_csv(out_path, index=False)
-    print(f"\n✅ Trade log successfully saved to:")
-    print(f"   {out_path}")
-except Exception as e:
-    print(f"\n❌ Final Save Attempt Failed: {e}")
-    # Absolute fallback: save to the root of the project
-    fallback_path = os.path.join(current_dir, "eurusd_backtest_trades.csv")
-    df_trades.to_csv(fallback_path, index=False)
-    print(f"⚠️ Saved to fallback root: {fallback_path}")
+    print(f"\n❌ Still failing. Emergency save to root...")
+    # Last resort: save directly to the project root with no folders
+    df_trades.to_csv("emergency_trade_log.csv", index=False)
+    print("✅ Emergency backup saved as 'emergency_trade_log.csv' in the main folder.")
 
