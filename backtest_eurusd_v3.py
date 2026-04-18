@@ -825,29 +825,22 @@ For 1+ trade/day:
 # SAVE TRADE LOG
 # ═══════════════════════════════════════════════════
 
-
-
-# ═══════════════════════════════════════════════════
+# ═════════════════════════════════════
 # SAVE TRADE LOG
-# ═══════════════════════════════════════════════════
+# ═════════════════════════════════════
 
 import os
 
-# Get current project directory (works in GitHub Codespaces)
-BASE_DIR = os.getcwd()
-
-# Create output directory
-output_dir = os.path.join(BASE_DIR, "outputs")
-
-# Ensure directory exists
+# create outputs folder if missing
+output_dir = "outputs"
 os.makedirs(output_dir, exist_ok=True)
 
-# Output file
+# file path
 out_path = os.path.join(output_dir, "eurusd_backtest_trades.csv")
 
-# Save CSV
+# save csv
 df_trades.to_csv(out_path, index=False)
 
 print(f"\n✅ Trade log saved to: {out_path}")
 print(f"Total trades: {len(df_trades)}")
-print(BANNER)
+
