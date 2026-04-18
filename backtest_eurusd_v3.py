@@ -822,7 +822,7 @@ For 1+ trade/day:
 """)
 
 # Save trade log CSV
-out_path = "/mnt/user-data/outputs/eurusd_backtest_trades.csv"
+out_path = "mnt/user-data/outputs/eurusd_backtest_trades.csv"
 df_trades.to_csv(out_path, index=False)
 print(f"\n✅ Trade log saved to: {out_path}")
 print(f"   Total trades: {len(df_trades)}")
