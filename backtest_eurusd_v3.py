@@ -821,9 +821,24 @@ For 1+ trade/day:
   - Cooldown: reduce to 15 min post-SL
 """)
 
-# Save trade log CSV
-out_path = "mnt/user-data/outputs/eurusd_backtest_trades.csv"
+# ═══════════════════════════════════════════════════
+# SAVE TRADE LOG
+# ═══════════════════════════════════════════════════
+
+import os
+
+# Create output folder inside the repo
+output_dir = "mnt/user-data/outputs"
+
+# Create folder if it doesn't exist
+os.makedirs(output_dir, exist_ok=True)
+
+# Output file path
+out_path = os.path.join(output_dir, "eurusd_backtest_trades.csv")
+
+# Save trades
 df_trades.to_csv(out_path, index=False)
+
 print(f"\n✅ Trade log saved to: {out_path}")
-print(f"   Total trades: {len(df_trades)}")
+print(f"Total trades: {len(df_trades)}")
 print(BANNER)
