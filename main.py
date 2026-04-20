@@ -1,11 +1,12 @@
 """
-Railway Entry Point — EUR/USD NY Scalp Bot V4
-==============================================
-Session:  NY only — 13:00–16:00 UTC (21:00–00:00 SGT)
+Railway Entry Point — EUR/USD Multi-Session Scalp Bot V4
+=========================================================
+Sessions:
+  Asian/London  06:00–09:00 UTC  (14:00–17:00 SGT)
+  London        09:00–12:00 UTC  (17:00–20:00 SGT)
+  NY            13:00–16:00 UTC  (21:00–00:00 SGT)
 Strategy: Triple-Confirm Trend Scalp
   SL=8 pips | TP=12 pips | R:R 1.5 | Max 45 min | 2 trades/day
-
-Backtest (Jan–Apr 2026): 45 trades | 53.3% WR | +17.7 pips
 
 Scans every 5 minutes via Railway cron.
 Sends Telegram alerts on trade open / TP / SL / timeout.
@@ -19,7 +20,7 @@ from datetime import datetime
 
 import pytz
 
-from bot            import run_bot, ASSET, is_in_session
+from bot            import run_bot, ASSET, get_active_session
 from oanda_trader   import OandaTrader
 from telegram_alert import TelegramAlert
 
@@ -78,11 +79,11 @@ def main():
     global STATE
 
     log.info("=" * 55)
-    log.info("🚀 EUR/USD Bot V4 Started — NY Session Scalp")
-    log.info("Session:  13:00–16:00 UTC  (21:00–00:00 SGT)")
-    log.info("Strategy: Triple-Confirm Trend Scalp")
+    log.info("🚀 EUR/USD Bot V4 Started — All Sessions")
+    log.info("Asian/London: 06-09 UTC (14-17 SGT)")
+    log.info("London:       09-12 UTC (17-20 SGT)")
+    log.info("NY:           13-16 UTC (21-00 SGT)")
     log.info("SL=8p | TP=12p | R:R=1.5 | Max 45 min | 2 trades/day")
-    log.info("Backtest WR: 53.3%  (Jan–Apr 2026, 45 trades)")
     log.info("=" * 55)
 
     if not check_env():
@@ -96,9 +97,10 @@ def main():
         "Strategy: Triple-Confirm Trend Scalp\n"
         "Pair:     EUR/USD\n"
         "SL: 8 pip | TP: 12 pip | R:R: 1.5\n"
-        "Session:  NY only — 21:00–00:00 SGT\n"
-        "Max:      2 trades/day | 45 min hold\n"
-        "Backtest: 53.3% WR | +17.7 pips (107 days)"
+        "Sessions: Asian/London 14-17 SGT\n"
+        "          London       17-20 SGT\n"
+        "          NY           21-00 SGT\n"
+        "Max:      2 trades/day | 45 min hold"
     )
 
     while True:
