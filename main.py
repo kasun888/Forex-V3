@@ -2,28 +2,16 @@
 Railway Entry Point - OANDA EUR/USD London+NY Session Scalp Bot
 ================================================================
 Windows (SGT):
-  15:00–19:00 SGT — London Open (EUR/USD prime window)
-  20:00–00:00 SGT — NY Session  (USD flows, second best)
-
-FIX LOG (inherited from GBP bot):
-  FIX-01: Login FAILED alert suppressed outside session windows
-  FIX-02: Login fail alert deduplicated per 30-min window
-  FIX-03: Startup Telegram sent so you know bot is alive
-  FIX-04: Session open alert sent once per window per day
-  FIX-05: Crash loop protection — 30s sleep on unhandled exception
-  FIX-06: No trade limit enforced in bot.py
-
-EUR/USD CHANGES:
-  - Signal threshold: 4/4 (vs 3/3 for GBP — more confirmation needed)
-  - Windows shifted to London 15:00-19:00 + NY 20:00-00:00 SGT
-  - Day reset handles midnight NY window correctly
+  15:00–19:00 SGT — London Open
+  20:00–00:00 SGT — NY Session
+Account: SGD
 """
 
 import os, time, logging, traceback
 from datetime import datetime
 import pytz
 
-from bot            import run_bot, ASSETS, is_in_session
+from bot            import run_bot, ASSETS, is_in_session, usd_to_sgd
 from oanda_trader   import OandaTrader
 from telegram_alert import TelegramAlert
 
@@ -42,11 +30,11 @@ def get_today_key():
     return datetime.now(sg_tz).strftime("%Y%m%d")
 
 
-def fresh_day_state(today_str, balance):
+def fresh_day_state(today_str, balance_usd):
     return {
         "date":               today_str,
         "trades":             0,
-        "start_balance":      balance,
+        "start_balance":      balance_usd,
         "daily_pnl":          0.0,
         "stopped":            False,
         "wins":               0,
@@ -80,46 +68,13 @@ def check_env_vars():
     return True
 
 
-def is_any_session_now():
-    now  = datetime.now(sg_tz)
-    hour = now.hour
-    return any(is_in_session(hour, cfg) for cfg in ASSETS.values())
-
-
-def check_session_open_alerts(alert):
-    """Send one alert when each window opens for the day."""
-    now   = datetime.now(sg_tz)
-    hour  = now.hour
-    today = now.strftime("%Y%m%d")
-
-    windows = [
-        {"start": 15, "label": "London", "desc": "15:00–19:00 SGT"},
-        {"start": 20, "label": "NY",     "desc": "20:00–00:00 SGT"},
-    ]
-
-    for w in windows:
-        if hour == w["start"]:
-            akey = "session_open_" + today + "_" + w["label"]
-            if not STATE.get("session_alerted", {}).get(akey):
-                if "session_alerted" not in STATE:
-                    STATE["session_alerted"] = {}
-                STATE["session_alerted"][akey] = True
-                balance = STATE.get("start_balance", 0.0)
-                alert.send(
-                    "🔔 " + w["label"] + " Window Open!\n"
-                    "⏰ " + now.strftime("%H:%M SGT") + " (" + w["desc"] + ")\n"
-                    "Balance: $" + str(round(balance, 2)) + "\n"
-                    "Scanning EUR/USD..."
-                )
-
-
 def main():
     global STATE
 
     log.info("=" * 50)
     log.info("🚀 Railway Bot Started - OANDA EUR/USD London+NY Scalp")
     log.info("Window 1: 15:00–19:00 SGT (London) | Window 2: 20:00–00:00 SGT (NY)")
-    log.info("EUR/USD | SL=13pip | TP=26pip | Signal: 4/4 | No trade limit")
+    log.info("EUR/USD | SL=13pip | TP=26pip | Signal: 4/4 | SGD Account")
     log.info("=" * 50)
 
     if not check_env_vars():
@@ -128,15 +83,27 @@ def main():
         return
 
     alert = TelegramAlert()
-    alert.send(
-        "🚀 EUR/USD Bot Started!\n"
-        "Pair: EUR/USD\n"
-        "SL: 13 pip | TP: 26 pip | 2:1 R:R\n"
-        "Signal: 4/4 (H4+H1+M15+M5)\n"
-        "Window 1: 15:00–19:00 SGT (London)\n"
-        "Window 2: 20:00–00:00 SGT (NY)\n"
-        "No trade limit"
-    )
+
+    # Get balance for startup message
+    try:
+        import json
+        settings_path = "settings.json"
+        demo_mode = True
+        try:
+            with open(settings_path) as f:
+                demo_mode = json.load(f).get("demo_mode", True)
+        except:
+            pass
+        trader = OandaTrader(demo=demo_mode)
+        balance_usd = trader.get_balance() if trader.login() else 0.0
+        balance_sgd = usd_to_sgd(balance_usd)
+        mode_str    = "DEMO" if demo_mode else "LIVE"
+    except Exception as e:
+        balance_sgd = 0.0
+        mode_str    = "DEMO"
+        log.warning("Startup balance fetch error: " + str(e))
+
+    alert.send_startup(balance_sgd=balance_sgd, mode=mode_str)
 
     while True:
         try:
@@ -146,18 +113,31 @@ def main():
 
             # Day reset
             if STATE.get("date") != today:
+                # Send daily summary if we have a previous day
+                if STATE.get("date"):
+                    try:
+                        bal_usd = trader.get_balance() if trader.login() else 0.0
+                        bal_sgd = usd_to_sgd(bal_usd)
+                        alert.send_daily_summary(
+                            balance_sgd=bal_sgd,
+                            start_balance_sgd=usd_to_sgd(STATE.get("start_balance", 0)),
+                            trades=STATE.get("trades", 0),
+                            wins=STATE.get("wins", 0),
+                            losses=STATE.get("losses", 0),
+                            pnl_sgd=usd_to_sgd(STATE.get("daily_pnl", 0.0)),
+                        )
+                    except Exception as e:
+                        log.warning("Daily summary error: " + str(e))
+
                 log.info("📅 New day! Fetching balance...")
                 try:
                     trader  = OandaTrader(demo=True)
-                    balance = trader.get_balance() if trader.login() else 0.0
+                    bal_usd = trader.get_balance() if trader.login() else 0.0
                 except Exception as e:
                     log.warning("Balance fetch error: " + str(e))
-                    balance = 0.0
-                log.info("📅 New day! Balance: $" + str(round(balance, 2)))
-                STATE = fresh_day_state(today, balance)
-
-            # Session open alerts
-            check_session_open_alerts(alert)
+                    bal_usd = 0.0
+                log.info("📅 New day! Balance: SGD " + str(usd_to_sgd(bal_usd)))
+                STATE = fresh_day_state(today, bal_usd)
 
             run_bot(state=STATE)
 
