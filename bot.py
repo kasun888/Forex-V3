@@ -34,8 +34,10 @@ SL_PIPS      = 13
 TP_PIPS      = 26
 MAX_DURATION = 30
 
-# SGD conversion rate — update periodically or fetch live if desired
-USD_SGD = 1.35
+# Account is natively SGD — no conversion needed.
+# P&L from OANDA API (realizedPL / unrealizedPL) is also in account currency (SGD).
+# SL/TP SGD estimates use a fixed SGD pip value for EUR/USD at ~1.35 SGD per pip per 10k units.
+SGD_PER_PIP_PER_10K = 1.35   # approximate; EUR/USD 1 pip ≈ USD 1 per 10k → SGD 1.35
 
 ASSETS = {
     "EUR_USD": {
@@ -67,8 +69,9 @@ def load_settings():
     return DEFAULT_SETTINGS
 
 
-def usd_to_sgd(usd_amount):
-    return round(usd_amount * USD_SGD, 2)
+def usd_to_sgd(amount):
+    """Account is natively SGD — balance/PnL from OANDA API is already in SGD."""
+    return round(amount, 2)
 
 
 def get_active_session(hour):
@@ -361,8 +364,9 @@ def run_bot(state):
             continue
 
         # ── Place trade ────────────────────────────────────────────────
-        sl_sgd = round(TRADE_SIZE * SL_PIPS * cfg["pip"] * USD_SGD, 2)
-        tp_sgd = round(TRADE_SIZE * TP_PIPS * cfg["pip"] * USD_SGD, 2)
+        # SL/TP in SGD: 74,000 units = 7.4 lots of 10k; 1 pip per 10k ≈ SGD 1.35
+        sl_sgd = round((TRADE_SIZE / 10000) * SL_PIPS * SGD_PER_PIP_PER_10K, 2)
+        tp_sgd = round((TRADE_SIZE / 10000) * TP_PIPS * SGD_PER_PIP_PER_10K, 2)
 
         result_order = trader.place_order(
             instrument=name, direction=direction, size=TRADE_SIZE,
